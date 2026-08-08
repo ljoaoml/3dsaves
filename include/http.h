@@ -1,5 +1,6 @@
 #pragma once
 #include <3ds.h>
+#include <stdio.h>
 
 // Thin wrapper around libctru's httpc service: TLS setup (default + bundled
 // root CAs), header/body handling, redirect following and response buffering.

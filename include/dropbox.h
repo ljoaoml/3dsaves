@@ -1,6 +1,7 @@
 #pragma once
 #include "auth.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 // Uploads the local SD file at `localPath` to `dropboxPath` (e.g.
 // "/3dsaves/CTR-P-AREE.zip"), overwriting any existing file there.
