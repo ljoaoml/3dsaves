@@ -24,6 +24,16 @@ typedef struct {
 Result http_init(void);
 void http_exit(void);
 
+// Diagnostics for the bundled-cert trust setup (see romfs/certs/README.md
+// for why this exists at all): how many cert files were actually read
+// from romfs vs. how many are compiled in, and how many of those were
+// successfully registered as trusted roots on the most recent request.
+// Use these to tell apart "romfs is missing files" from "httpc rejected
+// some certs" from "certs are all fine, the failure is something else".
+int http_get_loaded_cert_count(void);
+int http_get_total_cert_count(void);
+int http_get_last_trusted_count(void);
+
 // Performs a single HTTPS request, following redirects (up to 5 hops).
 // `body`/`body_size` may be NULL/0 for methods without a request body.
 // On success fills `out` (caller must call http_response_free when done).

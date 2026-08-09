@@ -45,6 +45,11 @@ typedef struct {
 static LoadedCert s_certs[NUM_CERT_FILES];
 static int s_certCount = 0;
 static bool s_httpInited = false;
+static int s_lastTrustedCount = -1; // -1 = no request attempted yet
+
+int http_get_loaded_cert_count(void) { return s_certCount; }
+int http_get_total_cert_count(void) { return (int)NUM_CERT_FILES; }
+int http_get_last_trusted_count(void) { return s_lastTrustedCount; }
 
 Result http_init(void) {
     Result rc = httpcInit(HTTP_CHUNK_SIZE);
@@ -106,10 +111,16 @@ static void apply_ssl_trust(httpcContext *ctx) {
     // Best-effort per cert: one bad/rejected entry (e.g. a context-level
     // limit on trusted roots) shouldn't take the whole request down with
     // it when the other certs might still be enough to validate the
-    // actual chain the server presents.
+    // actual chain the server presents. Track how many actually succeed
+    // so callers can tell "certs are fine, problem is elsewhere" apart
+    // from "httpc is silently rejecting some of them" -- see http.h.
+    int trusted = 0;
     for (int i = 0; i < s_certCount; i++) {
-        httpcAddTrustedRootCA(ctx, s_certs[i].data, s_certs[i].size);
+        if (R_SUCCEEDED(httpcAddTrustedRootCA(ctx, s_certs[i].data, s_certs[i].size))) {
+            trusted++;
+        }
     }
+    s_lastTrustedCount = trusted;
 }
 
 static Result buffer_append(HttpBuffer *buf, const u8 *chunk, u32 chunk_size) {

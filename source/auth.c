@@ -256,9 +256,15 @@ bool auth_run_login_flow(DropboxTokens *out) {
             } else if (pr == RELAY_UNAVAILABLE && lastReported != RELAY_UNAVAILABLE) {
                 // Report this once (not every poll) so a broken relay
                 // connection is visible instead of just waiting forever
-                // indistinguishably from "still pending".
-                char msg[96];
-                snprintf(msg, sizeof(msg), "(can't reach relay: %s)\n", diag[0] ? diag : "unknown");
+                // indistinguishably from "still pending". Also show the
+                // cert diagnostics (http.h) so a TLS failure is fully
+                // legible: were all bundled certs even loaded from romfs,
+                // and did httpc accept them as trusted roots.
+                char msg[160];
+                snprintf(msg, sizeof(msg), "(can't reach relay: %s | certs %d/%d loaded, %d trusted)\n",
+                         diag[0] ? diag : "unknown",
+                         http_get_loaded_cert_count(), http_get_total_cert_count(),
+                         http_get_last_trusted_count());
                 ui_print_bottom(msg);
             } else if (pr == RELAY_PENDING && lastReported == RELAY_UNAVAILABLE) {
                 ui_print_bottom("(reached the relay again)\n");
