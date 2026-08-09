@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <time.h>
 
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
@@ -829,6 +830,18 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     FILE *f = fopen(path, "wb");
     if (!f) return;
 
+#ifndef KONNECT3DS_GIT_HASH
+#define KONNECT3DS_GIT_HASH "unknown"
+#endif
+    fprintf(f, "Build: %s\n", KONNECT3DS_GIT_HASH);
+    {
+        time_t now = time(NULL);
+        struct tm *tmNow = localtime(&now);
+        char timeBuf[32];
+        if (tmNow) strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", tmNow);
+        else snprintf(timeBuf, sizeof(timeBuf), "(unknown)");
+        fprintf(f, "Written at: %s (raw=%lld)\n", timeBuf, (long long)now);
+    }
     fprintf(f, "URL: %s\n", url);
     fprintf(f, "Resolved IP: %s\n", http_get_last_resolved_ip());
     fprintf(f, "TLS: %s %s\n", http_get_last_tls_version(), http_get_last_tls_cipher());
