@@ -30,6 +30,14 @@ bool ui_confirm(const char *prompt);
 // Blocks until any of KEY_A/KEY_B/KEY_START is pressed (for "press A to continue" screens).
 void ui_wait_for_a(void);
 
+// Top-screen status lines with color (green/red), for reporting an
+// operation's outcome without cluttering ui_print's plain-text callers.
+void ui_print_success(const char *text);
+void ui_print_error(const char *text);
+
+// Top-screen colored title + underline (e.g. for a screen's heading).
+void ui_print_header(const char *title);
+
 // Same as ui_clear/ui_print/ui_printf but for the bottom screen, for
 // screens that need the top screen free for something else (e.g. the
 // Dropbox login QR code, drawn directly to the top screen's framebuffer).
@@ -38,3 +46,4 @@ void ui_wait_for_a(void);
 void ui_clear_bottom(void);
 void ui_print_bottom(const char *text);
 void ui_printf_bottom(const char *fmt, ...);
+void ui_print_header_bottom(const char *title);

@@ -113,7 +113,7 @@ bool auth_run_login_flow(DropboxTokens *out) {
 
     ui_clear();
     ui_clear_bottom();
-    ui_print_bottom("=== Link Dropbox account ===\n\n");
+    ui_print_header_bottom("Link Dropbox account");
     ui_print_bottom("1. Scan the QR code on the TOP screen\n");
     ui_print_bottom("   with your phone's camera.\n");
     ui_print_bottom("2. Log in and click Allow.\n");

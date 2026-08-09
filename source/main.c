@@ -55,8 +55,10 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
 
     Result rc = saves_backup_title(t, TMP_ZIP_PATH);
     if (R_FAILED(rc)) {
-        ui_printf("\nFailed to read save data (0x%08lX).\n", (unsigned long)rc);
-        ui_printf("Does this title have any save data yet?\n");
+        char msg[96];
+        snprintf(msg, sizeof(msg), "\nFailed to read save data (0x%08lX).\n", (unsigned long)rc);
+        ui_print_error(msg);
+        ui_print("Does this title have any save data yet?\n");
         ui_wait_for_a();
         return;
     }
@@ -75,9 +77,13 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     remove(TMP_ZIP_PATH);
 
     if (ok) {
-        ui_printf("\nUploaded to Dropbox:%s\n", dropboxPath);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
+        ui_print_success(msg);
     } else {
-        ui_printf("\nUpload failed: %s\n", error);
+        char msg[288];
+        snprintf(msg, sizeof(msg), "\nUpload failed: %s\n", error);
+        ui_print_error(msg);
     }
     ui_wait_for_a();
 }
@@ -96,7 +102,7 @@ int main(void) {
     refresh_titles(&state);
 
     ui_clear();
-    ui_print("3dsaves - back up game saves to Dropbox\n\n");
+    ui_print_header("3dsaves - back up game saves to Dropbox");
     ui_print("Select a title on the bottom screen, or\n");
     ui_print("log in to Dropbox first if you haven't yet.\n");
     ui_flush();
@@ -113,13 +119,17 @@ int main(void) {
                     auth_delete_tokens();
                     memset(&tokens, 0, sizeof(tokens));
                     state.loggedIn = false;
-                    ui_print("\nLogged out.\n");
+                    ui_print_success("\nLogged out.\n");
                     ui_flush();
                 }
             } else {
                 state.loggedIn = auth_run_login_flow(&tokens);
                 ui_clear();
-                ui_print(state.loggedIn ? "Logged in to Dropbox.\n" : "Login cancelled or failed.\n");
+                if (state.loggedIn) {
+                    ui_print_success("Logged in to Dropbox.\n");
+                } else {
+                    ui_print_error("Login cancelled or failed.\n");
+                }
                 ui_flush();
             }
         } else if (choice == 1) {
