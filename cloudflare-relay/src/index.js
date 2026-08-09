@@ -61,6 +61,10 @@ async function pkceChallenge(verifier) {
   return base64url(new Uint8Array(digest));
 }
 
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function htmlPage(title, message, ok, extraHtml) {
   const color = ok ? "#1a7f37" : "#cf222e";
   return `<!doctype html><html><head><meta charset="utf-8">
@@ -158,15 +162,42 @@ async function handleCallback(url, env) {
     `refresh_token=${tokenJson.refresh_token}\n` +
     `expires_at=${expiresAt}\n`;
 
+  // A plain data: URI + download attribute doesn't reliably trigger an
+  // actual file download on mobile browsers (notably iOS Safari, but
+  // also some Android browsers) -- most just navigate to/display the
+  // data URI instead of saving it. A Blob + object URL, set on the
+  // anchor after the page loads, is the combination that reliably
+  // triggers a real download across current mobile browsers. The
+  // read-only textarea below is a manual-copy fallback for the rare
+  // browser (e.g. some in-app/embedded webviews) that blocks even that.
   const downloadHtml = `
-    <p>Download this file and copy it (as a file, not its contents) to
-    <code>3ds/Konnect3DS/paste_tokens.txt</code> on the 3DS's SD card --
-    it's picked up automatically within a second, no typing needed.</p>
-    <a href="data:text/plain;charset=utf-8,${encodeURIComponent(fileContent)}"
-       download="paste_tokens.txt"
+    <p>Tap the button below to download the file, then copy it (as a
+    file, not its contents) to <code>3ds/Konnect3DS/paste_tokens.txt</code>
+    on the 3DS's SD card -- it's picked up automatically within a second,
+    no typing needed.</p>
+    <a id="dlBtn" href="#" download="paste_tokens.txt"
        style="display:inline-block;margin:12px 0;padding:12px 20px;
        background:#0061fe;color:#fff;border-radius:6px;
-       text-decoration:none;font-weight:600">Download paste_tokens.txt</a>`;
+       text-decoration:none;font-weight:600">Download paste_tokens.txt</a>
+    <p style="margin-top:24px;font-size:0.85em;color:#57606a">
+    If that button doesn't start a download (some mobile browsers block
+    it), tap the box below, select all, copy, and paste the text into a
+    new plain-text file named <code>paste_tokens.txt</code> using any
+    notes/files app instead.</p>
+    <textarea readonly rows="4" onclick="this.select()"
+      style="width:100%;box-sizing:border-box;font-family:monospace;
+      font-size:0.8em;padding:8px">${escapeHtml(fileContent)}</textarea>
+    <script>
+      (function () {
+        var content = ${JSON.stringify(fileContent)};
+        try {
+          var blob = new Blob([content], { type: "text/plain" });
+          document.getElementById("dlBtn").href = URL.createObjectURL(blob);
+        } catch (e) {
+          // Blob unsupported in this browser -- the textarea fallback above still works.
+        }
+      })();
+    </script>`;
 
   return new Response(
     htmlPage("Almost done", "One more step to get this onto your 3DS:", true, downloadHtml),
