@@ -138,6 +138,11 @@ int main(void) {
 
     ui_clear();
     ui_print_header("Konnect3DS - back up game saves to Dropbox");
+#ifndef KONNECT3DS_GIT_HASH
+#define KONNECT3DS_GIT_HASH "unknown"
+#endif
+    ui_printf("build %s\n", KONNECT3DS_GIT_HASH);
+    ui_flush();
 
     // api.dropboxapi.com is the domain the app actually talks to (token
     // exchange/refresh) -- www.dropbox.com only ever opens in the phone's

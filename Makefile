@@ -52,7 +52,16 @@ CFLAGS	:=	-g -Wall -O2 -mword-relocations \
 			-fomit-frame-pointer -ffunction-sections \
 			$(ARCH)
 
-CFLAGS	+=	$(INCLUDE) -D__3DS__
+# Embeds the current git commit so the running app can show exactly what
+# source it was built from (see the header line printed in main.c) --
+# the point is to make "am I actually testing the build I think I am"
+# a one-glance check instead of a guessing game.
+GIT_HASH	:=	$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+ifneq ($(shell git status --porcelain 2>/dev/null),)
+GIT_HASH	:=	$(GIT_HASH)-dirty
+endif
+
+CFLAGS	+=	$(INCLUDE) -D__3DS__ -DKONNECT3DS_GIT_HASH=\"$(GIT_HASH)\"
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 
