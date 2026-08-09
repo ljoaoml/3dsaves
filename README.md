@@ -37,19 +37,32 @@ scaffold):
   version defaults to. Confirmed rendering correctly on real hardware
   after that.
 - **Login no longer requires typing a code at all**, if `cloudflare-relay/`
-  is deployed: Dropbox redirects there instead of displaying the code, and
-  the 3DS polls it automatically. See that project's README for why a
-  relay is needed (short version: the browser completing login runs on a
-  phone, a different device than the 3DS, so a direct OAuth redirect to
-  the 3DS isn't possible). Manual entry still works as a fallback.
+  is deployed: the 3DS shows a QR code for the relay's `/start`, the
+  phone does the whole Dropbox login+approval there, and the relay's
+  `/callback` page ends with a "Download" button for a small file
+  containing the finished tokens. Copy that file (not its contents) to
+  `3ds/Konnect3DS/paste_tokens.txt` on the SD card and the 3DS picks it
+  up automatically within about half a second. Manual entry still works
+  as a fallback. See `cloudflare-relay/README.md` for why the exchange
+  happens entirely on the relay instead of the 3DS polling it directly.
 - **Every HTTPS request was failing TLS certificate verification**
   (`rc=0xD8A0A03C`), against both the Cloudflare relay and Dropbox's own
   servers, no matter which root CAs were bundled — root-caused to the
   3DS system's own TLS stack being unable to handshake with modern
   servers at all (even the native Internet Browser fails identically).
   Fixed by rewriting `source/http.c` to do TLS itself, over raw sockets
-  (`soc:u`) + mbedTLS, instead of going through `httpc`/`ssl:C`. Not yet
-  confirmed on real hardware — see `main.c`'s startup self-test.
+  (`soc:u`) + mbedTLS, instead of going through `httpc`/`ssl:C`. Confirmed
+  working on real hardware, including TLS version/cipher negotiation and
+  certificate verification.
+- **The 3DS's own HTTPS requests to Cloudflare-fronted domains get a raw
+  `400 Bad Request` straight from the edge**, on every domain tried
+  (`*.workers.dev`, a dedicated custom domain, even an unrelated
+  third-party Cloudflare-fronted site) despite byte-exact, well-formed
+  requests and clean TLS negotiation — while the exact same client works
+  fine against Dropbox's own servers. Root cause unresolved; the
+  Cloudflare relay was redesigned around it instead (see the bullet
+  above and `cloudflare-relay/README.md`) so the 3DS never needs to
+  successfully reach Cloudflare at all.
 
 ## What it does
 
@@ -69,11 +82,13 @@ scaffold):
    MIT-licensed) so you scan it with a phone instead of typing a long URL
    by hand; the plain-text URL still prints on the bottom screen as a
    fallback. If `cloudflare-relay/` is deployed and configured (see its
-   README), login finishes automatically once you approve on Dropbox --
-   no code to type at all. Otherwise it falls back to the no-redirect-URI
-   flow, where Dropbox shows a code you type back in via the 3DS software
-   keyboard (`source/auth.c`). No client secret is embedded in the binary
-   either way.
+   README), the QR code points at the relay instead of Dropbox directly:
+   the relay does the whole login+token exchange server-side and offers a
+   downloadable token file to copy onto the SD card -- no code to type,
+   and no network request from the 3DS to the relay at all. Otherwise it
+   falls back to the no-redirect-URI flow, where Dropbox shows a code you
+   type back in via the 3DS software keyboard (`source/auth.c`). No
+   client secret is embedded in the binary either way.
 4. Uploads the zip to `/Konnect3DS/<PRODUCT-CODE>_<TITLEID>.zip` in the
    user's Dropbox via `POST /2/files/upload` (`source/dropbox.c`).
 
@@ -157,8 +172,10 @@ one bit of typing.
 
 - On first run, select **Log in to Dropbox**, scan the QR code on the top
   screen with your phone (or type the URL printed on the bottom screen
-  manually), and approve access. If the Cloudflare relay is set up, that's
-  it -- the 3DS picks up the login on its own within a couple seconds.
+  manually), and approve access. If the Cloudflare relay is set up, finish
+  by tapping **Download** on the page that follows and copying that file
+  (via FTP or similar) to `3ds/Konnect3DS/paste_tokens.txt` on the SD
+  card -- the 3DS picks it up on its own within about half a second.
   Otherwise, press A on the 3DS and paste the code Dropbox shows you.
 - Pick a title from the list and it backs up + uploads immediately.
   Titles show their real name when available, falling back to product

@@ -15,23 +15,20 @@
 #define DROPBOX_CLIENT_ID "xxd9vkjyoedihll"
 #endif
 
-// Base URL (no trailing slash) of the OAuth relay in cloudflare-relay/,
-// used so the 3DS doesn't need the code typed in by hand: Dropbox
-// redirects the phone's browser to <RELAY_BASE_URL>/callback, and the 3DS
-// polls <RELAY_BASE_URL>/poll until the code shows up. See
-// cloudflare-relay/README.md for how to deploy your own. If left as the
-// placeholder below, login falls back to manual code entry (the original
-// no-redirect-URI flow) instead of polling.
-//
-// A custom domain, not *.workers.dev: real-hardware testing showed the
-// 3DS's /poll requests getting a raw "400 Bad Request" straight from
-// Cloudflare's edge (confirmed via sdmc:/3ds/Konnect3DS/http_debug.log --
-// the request itself was a complete, well-formed HTTP/1.1 GET, byte
-// count matched exactly), even though the exact same client succeeds
-// against api.dropboxapi.com and example.com. *.workers.dev is a shared,
-// heavily-abused namespace that Cloudflare polices far more
-// aggressively than a real domain -- see cloudflare-relay/README.md's
-// "Using a custom domain" section for how to set one up.
+// Base URL (no trailing slash) of the OAuth relay in cloudflare-relay/.
+// The 3DS's own HTTPS requests to this relay always get a raw "400 Bad
+// Request" straight from Cloudflare's edge -- confirmed on real hardware
+// against workers.dev, a dedicated custom domain, and even an unrelated
+// third-party Cloudflare-fronted site, while the exact same client works
+// fine against api.dropboxapi.com. So the 3DS never talks to this relay
+// over the network at all: it just shows a QR code pointing at
+// <RELAY_BASE_URL>/start, and the relay does the *entire* OAuth exchange
+// server-side (Cloudflare -> Dropbox is a normal, unblocked
+// server-to-server request), ending with a page that offers a
+// downloadable, ready-to-use token file. The user copies that file onto
+// the SD card (e.g. via FTP) and it's picked up automatically -- see
+// cloudflare-relay/README.md. If left as the placeholder below, login
+// falls back to manual code entry (the original no-redirect-URI flow).
 #ifndef RELAY_BASE_URL
 #define RELAY_BASE_URL "https://konnect3ds.vgchampions.org"
 #endif

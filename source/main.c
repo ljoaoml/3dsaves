@@ -169,12 +169,12 @@ int main(void) {
 
     // api.dropboxapi.com is the domain the app actually talks to (token
     // exchange/refresh) -- www.dropbox.com only ever opens in the phone's
-    // browser via the QR code, this app never fetches it. example.com is
-    // an unrelated, bot-protection-free control: the relay
-    // (*.workers.dev) has been completing requests fine on this same
-    // build, so if Dropbox's own servers time out while example.com
-    // doesn't, that points at something specific to Dropbox's TLS
-    // termination rather than a general bug in this app's TLS client.
+    // browser via the QR code, this app never fetches it, and the OAuth
+    // relay (cloudflare-relay/) is never contacted by the 3DS at all
+    // (see include/auth.h). example.com is a control target: if it and
+    // api.dropboxapi.com behave differently, that points at something
+    // specific to one side rather than a general bug in this app's TLS
+    // client.
     selftest_https("api.dropboxapi.com", "https://api.dropboxapi.com/");
     selftest_https("example.com (control)", "https://example.com/");
 

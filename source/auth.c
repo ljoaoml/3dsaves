@@ -22,8 +22,19 @@
 // phone) into a plain text file with this name in the Konnect3DS folder
 // on the SD card (e.g. via FTP homebrew), and it's picked up
 // automatically. Deleted after reading so a stale one doesn't get
-// reused by a later login attempt.
+// reused by a later login attempt. Fallback for when the relay below
+// isn't configured/used.
 #define PASTE_CODE_FILE "sdmc:/3ds/Konnect3DS/paste_code.txt"
+
+// The primary path: cloudflare-relay/ now does the *entire* OAuth
+// exchange server-side (Cloudflare -> Dropbox is a normal, unblocked
+// request; only the 3DS's own requests to the relay get rejected -- see
+// the repo README) and its /callback page offers a download containing
+// the final tokens already in this exact file format, so this is just
+// the token file, delivered without the 3DS ever needing to reach the
+// relay over the network. Same trim-and-delete-after-reading handling
+// as PASTE_CODE_FILE.
+#define PASTE_TOKENS_FILE "sdmc:/3ds/Konnect3DS/paste_tokens.txt"
 
 static bool random_bytes(void *out, size_t size) {
     Result rc = psInit();
@@ -45,72 +56,6 @@ static void make_pkce_pair(char verifier_out[128], char challenge_out[128]) {
     uint8_t hash[SHA256_BLOCK_SIZE];
     sha256_buf((const uint8_t *)verifier_out, strlen(verifier_out), hash);
     base64url_encode(hash, sizeof(hash), challenge_out); // 43 chars
-}
-
-// Unrelated to the PKCE pair -- just a random correlation id for the
-// relay (see cloudflare-relay/), so it knows which in-flight login a
-// polling request belongs to. Base64url output needs no URL-encoding.
-static void make_state_token(char out[64]) {
-    uint8_t randomBytes[24];
-    if (!random_bytes(randomBytes, sizeof(randomBytes))) {
-        srand((unsigned)osGetTime() ^ 0x5A5A5A5A);
-        for (size_t i = 0; i < sizeof(randomBytes); i++) randomBytes[i] = (uint8_t)rand();
-    }
-    base64url_encode(randomBytes, sizeof(randomBytes), out); // 32 chars
-}
-
-typedef enum {
-    RELAY_PENDING,
-    RELAY_READY,
-    RELAY_ERROR,
-    RELAY_UNAVAILABLE,
-} RelayPollResult;
-
-// Asks cloudflare-relay/ whether Dropbox has redirected the code back yet
-// for this login attempt (`state`). See that project's README for why
-// this exists: the 3DS can't receive an OAuth redirect itself since the
-// browser completing the login runs on a different device (the phone).
-// diag is filled with a short human-readable reason whenever the result
-// is RELAY_UNAVAILABLE, so the caller can show *why* instead of just
-// "still waiting" -- this is what actually pinned down the missing-root-CA
-// bug that a plain "can't reach relay" message couldn't distinguish from
-// a real network hiccup.
-static RelayPollResult poll_relay(const char *state, char *codeOut, size_t codeOutSize,
-                                   char *errorOut, size_t errorOutSize,
-                                   char *diag, size_t diagSize) {
-    char url[512];
-    snprintf(url, sizeof(url), "%s/poll?state=%s", RELAY_BASE_URL, state);
-
-    HttpResponse resp;
-    Result rc = http_request(HTTPC_METHOD_GET, url, NULL, 0, NULL, 0, &resp);
-    if (R_FAILED(rc)) {
-        if (diag) snprintf(diag, diagSize, "rc=0x%08lX", (unsigned long)rc);
-        return RELAY_UNAVAILABLE;
-    }
-
-    RelayPollResult result = RELAY_UNAVAILABLE;
-    if (resp.status_code == 200 && resp.body.data) {
-        char status[16] = {0};
-        const char *json = (const char *)resp.body.data;
-        if (json_get_string(json, "status", status, sizeof(status))) {
-            if (strcmp(status, "ready") == 0 && json_get_string(json, "code", codeOut, codeOutSize)) {
-                result = RELAY_READY;
-            } else if (strcmp(status, "pending") == 0) {
-                result = RELAY_PENDING;
-            } else if (strcmp(status, "error") == 0) {
-                json_get_string(json, "error", errorOut, errorOutSize);
-                result = RELAY_ERROR;
-            } else if (diag) {
-                snprintf(diag, diagSize, "unexpected status field");
-            }
-        } else if (diag) {
-            snprintf(diag, diagSize, "bad JSON, HTTP %lu", (unsigned long)resp.status_code);
-        }
-    } else if (diag) {
-        snprintf(diag, diagSize, "HTTP %lu", (unsigned long)resp.status_code);
-    }
-    http_response_free(&resp);
-    return result;
 }
 
 // See PASTE_CODE_FILE's comment. Trims surrounding whitespace/newlines
@@ -138,11 +83,9 @@ static bool check_pasted_code_file(char *codeOut, size_t codeOutSize) {
     return true;
 }
 
-bool auth_load_tokens(DropboxTokens *tokens) {
-    memset(tokens, 0, sizeof(*tokens));
-    FILE *f = fopen(DROPBOX_TOKEN_FILE, "rb");
-    if (!f) return false;
-
+// Shared by auth_load_tokens() (the real token file) and
+// check_pasted_tokens_file() (PASTE_TOKENS_FILE, same format).
+static bool parse_token_file(FILE *f, DropboxTokens *tokens) {
     char line[600];
     bool haveAccess = false, haveRefresh = false;
     while (fgets(line, sizeof(line), f)) {
@@ -158,9 +101,28 @@ bool auth_load_tokens(DropboxTokens *tokens) {
             tokens->expires_at_unix = strtoull(line + 11, NULL, 10);
         }
     }
-    fclose(f);
     tokens->valid = haveAccess && haveRefresh;
     return tokens->valid;
+}
+
+// See PASTE_TOKENS_FILE's comment.
+static bool check_pasted_tokens_file(DropboxTokens *out) {
+    FILE *f = fopen(PASTE_TOKENS_FILE, "rb");
+    if (!f) return false;
+    memset(out, 0, sizeof(*out));
+    bool ok = parse_token_file(f, out);
+    fclose(f);
+    remove(PASTE_TOKENS_FILE);
+    return ok;
+}
+
+bool auth_load_tokens(DropboxTokens *tokens) {
+    memset(tokens, 0, sizeof(*tokens));
+    FILE *f = fopen(DROPBOX_TOKEN_FILE, "rb");
+    if (!f) return false;
+    bool ok = parse_token_file(f, tokens);
+    fclose(f);
+    return ok;
 }
 
 bool auth_save_tokens(const DropboxTokens *tokens) {
@@ -205,33 +167,21 @@ bool auth_run_login_flow(DropboxTokens *out) {
     char verifier[128], challenge[128];
     make_pkce_pair(verifier, challenge);
 
-    // The Cloudflare relay's /poll requests get a raw 400 straight from
-    // Cloudflare's edge on every domain tried (workers.dev, a dedicated
-    // custom domain with Bot Fight Mode off), confirmed via
-    // http_debug_N.log to be a complete, correctly-formed request each
-    // time -- something about this client's TLS/HTTP fingerprint that
-    // Cloudflare specifically doesn't like, unrelated to Dropbox (whose
-    // own servers accept the exact same client fine) or to this app's
-    // request formatting. Forced off until the relay is hosted
-    // somewhere without that problem; PASTE_CODE_FILE below is the
-    // no-network alternative to typing the code on the stylus keyboard.
-    bool useRelay = false;
-    char state[64] = {0};
+    // The relay (cloudflare-relay/) now does the *entire* OAuth exchange
+    // server-side and hands back a ready-to-use token file -- the 3DS
+    // never needs to reach it over the network at all (which doesn't
+    // work anyway: the 3DS's own requests to this relay get a raw 400
+    // from Cloudflare's edge on every domain tried, unrelated to
+    // Dropbox, whose own servers accept this exact client fine -- see
+    // the repo README). The QR code just points at the relay's /start;
+    // PKCE is generated on the relay now, not here, for that path. The
+    // on-device PKCE pair above is still used for the manual fallback
+    // below (PASTE_CODE_FILE / typed code) when the relay isn't set up.
+    bool useRelay = strcmp(RELAY_BASE_URL, "PUT_YOUR_RELAY_URL_HERE") != 0;
 
     char url[1024];
     if (useRelay) {
-        make_state_token(state);
-        char redirectUri[256];
-        snprintf(redirectUri, sizeof(redirectUri), "%s/callback", RELAY_BASE_URL);
-        char encodedRedirectUri[512];
-        http_url_encode(redirectUri, encodedRedirectUri, sizeof(encodedRedirectUri));
-
-        snprintf(url, sizeof(url),
-                 "%s?client_id=%s&response_type=code&code_challenge=%s"
-                 "&code_challenge_method=S256&token_access_type=offline"
-                 "&redirect_uri=%s&state=%s",
-                 DROPBOX_AUTHORIZE_URL, DROPBOX_CLIENT_ID, challenge,
-                 encodedRedirectUri, state);
+        snprintf(url, sizeof(url), "%s/start", RELAY_BASE_URL);
     } else {
         snprintf(url, sizeof(url),
                  "%s?client_id=%s&response_type=code&code_challenge=%s"
@@ -257,12 +207,21 @@ bool auth_run_login_flow(DropboxTokens *out) {
     ui_print_bottom("1. Scan the QR code on the TOP screen\n");
     ui_print_bottom("   with your phone's camera.\n");
     ui_print_bottom("2. Log in and click Allow.\n");
-    ui_print_bottom("3. Copy the code Dropbox shows you.\n");
-    ui_print_bottom("4a. Save it as plain text to\n");
-    ui_print_bottom("    3ds/Konnect3DS/paste_code.txt\n");
-    ui_print_bottom("    on the SD card (e.g. via FTP) --\n");
-    ui_print_bottom("    picked up automatically, or\n");
-    ui_print_bottom("4b. Press A here to type it in.\n\n");
+    if (useRelay) {
+        ui_print_bottom("3. Tap the \"Download\" button on the\n");
+        ui_print_bottom("   page that follows.\n");
+        ui_print_bottom("4. Copy the downloaded file (not its\n");
+        ui_print_bottom("   contents) to 3ds/Konnect3DS/ on\n");
+        ui_print_bottom("   the SD card (e.g. via FTP) --\n");
+        ui_print_bottom("   picked up automatically.\n\n");
+    } else {
+        ui_print_bottom("3. Copy the code Dropbox shows you.\n");
+        ui_print_bottom("4a. Save it as plain text to\n");
+        ui_print_bottom("    3ds/Konnect3DS/paste_code.txt\n");
+        ui_print_bottom("    on the SD card (e.g. via FTP) --\n");
+        ui_print_bottom("    picked up automatically, or\n");
+        ui_print_bottom("4b. Press A here to type it in.\n\n");
+    }
     ui_print_bottom("(B to cancel)\n\n");
     ui_print_bottom("Can't scan? Full URL:\n");
     ui_print_bottom(url);
@@ -273,12 +232,12 @@ bool auth_run_login_flow(DropboxTokens *out) {
 
     char code[256] = {0};
     bool haveCode = false;
+    bool haveTokens = false;
     bool cancelled = false;
     bool wantManualEntry = false;
     int frame = 0;
 
-    RelayPollResult lastReported = RELAY_PENDING;
-    while (!haveCode && !cancelled && !wantManualEntry) {
+    while (!haveCode && !haveTokens && !cancelled && !wantManualEntry) {
         qr_draw_frame(qr);
 
         hidScanInput();
@@ -287,55 +246,14 @@ bool auth_run_login_flow(DropboxTokens *out) {
         if (kDown & KEY_A) { wantManualEntry = true; break; }
 
         if (frame > 0 && frame % 30 == 0) { // ~every 0.5s at 60fps
+            if (check_pasted_tokens_file(out)) {
+                haveTokens = true;
+                break;
+            }
             if (check_pasted_code_file(code, sizeof(code))) {
                 haveCode = true;
                 break;
             }
-        }
-
-        if (useRelay && frame > 0 && frame % 120 == 0) { // ~every 2s at 60fps
-            char relayError[128] = {0};
-            char diag[64] = {0};
-            RelayPollResult pr = poll_relay(state, code, sizeof(code), relayError, sizeof(relayError),
-                                             diag, sizeof(diag));
-            if (pr == RELAY_READY) {
-                haveCode = true;
-            } else if (pr == RELAY_ERROR) {
-                qr_free(qr);
-                ui_clear();
-                ui_print_error("Dropbox login failed: ");
-                ui_print_error(relayError[0] ? relayError : "unknown error");
-                ui_print("\n");
-                ui_wait_for_a();
-                return false;
-            } else if (pr == RELAY_UNAVAILABLE && lastReported != RELAY_UNAVAILABLE) {
-                // Report this once (not every poll) so a broken relay
-                // connection is visible instead of just waiting forever
-                // indistinguishably from "still pending". Printed
-                // straight to the bottom screen, in the same moment as
-                // the test, rather than only to the SD card debug log --
-                // matching a log file to the test that produced it (SD
-                // card timing, stale files, multiple consoles/cards)
-                // turned out to be its own source of confusion.
-                char msg[280];
-                snprintf(msg, sizeof(msg),
-                         "(can't reach relay: %s | certs %d/%d loaded, %d trusted "
-                         "| ip=%s tls=%s %s | verify=%s | sent=%d recv=%d)\n",
-                         diag[0] ? diag : "unknown",
-                         http_get_loaded_cert_count(), http_get_total_cert_count(),
-                         http_get_last_trusted_count(),
-                         http_get_last_resolved_ip(), http_get_last_tls_version(),
-                         http_get_last_tls_cipher(), http_get_last_verify_info(),
-                         http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
-                ui_print_bottom(msg);
-                snprintf(msg, sizeof(msg), "(verify flags: raw=0x%08lX after_mask=0x%08lX)\n",
-                         (unsigned long)http_get_last_verify_flags_raw(),
-                         (unsigned long)http_get_last_verify_flags_after_mask());
-                ui_print_bottom(msg);
-            } else if (pr == RELAY_PENDING && lastReported == RELAY_UNAVAILABLE) {
-                ui_print_bottom("(reached the relay again)\n");
-            }
-            lastReported = pr;
         }
         frame++;
         gspWaitForVBlank();
@@ -344,6 +262,16 @@ bool auth_run_login_flow(DropboxTokens *out) {
     qr_free(qr);
 
     if (cancelled) return false;
+
+    if (haveTokens) {
+        // The relay already did the full token exchange server-side;
+        // this file *is* the finished result, nothing left to do here
+        // but persist it.
+        ui_clear();
+        ui_flush();
+        auth_save_tokens(out);
+        return true;
+    }
 
     // Drew straight to the top screen's framebuffer, bypassing the
     // console entirely -- clear it properly now so the console's own
