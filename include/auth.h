@@ -23,7 +23,7 @@
 // placeholder below, login falls back to manual code entry (the original
 // no-redirect-URI flow) instead of polling.
 #ifndef RELAY_BASE_URL
-#define RELAY_BASE_URL "PUT_YOUR_RELAY_URL_HERE"
+#define RELAY_BASE_URL "https://konnect3ds-oauth-relay.ljoaomarcosalves.workers.dev"
 #endif
 
 #define DROPBOX_TOKEN_FILE "sdmc:/Konnect3DS/dropbox_token.txt"
