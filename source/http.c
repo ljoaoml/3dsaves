@@ -609,6 +609,32 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
         n = snprintf(line, sizeof(line), "Accept-Language: en-US,en;q=0.9\r\n");
         rc = buffer_append(&req, (const u8 *)line, (u32)n);
     }
+    // Cloudflare's edge is still rejecting well-formed, byte-verified
+    // requests with a raw 400 even on a dedicated custom domain (not
+    // just *.workers.dev), so this isn't about the domain being shared --
+    // add a few more headers every real Chrome navigation sends
+    // (Fetch Metadata + the legacy upgrade-insecure-requests hint) on
+    // the chance their absence, not just the UA string, is part of
+    // what's flagging this as non-browser traffic. Deliberately not
+    // claiming Accept-Encoding: gzip/br -- this client can't decompress
+    // either, and lying about that would break real responses instead
+    // of just this diagnostic.
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line), "Sec-Fetch-Dest: document\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line), "Sec-Fetch-Mode: navigate\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line), "Sec-Fetch-Site: none\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line), "Upgrade-Insecure-Requests: 1\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
     if (R_SUCCEEDED(rc) && body && body_size > 0) {
         n = snprintf(line, sizeof(line), "Content-Length: %lu\r\n", (unsigned long)body_size);
         rc = buffer_append(&req, (const u8 *)line, (u32)n);
