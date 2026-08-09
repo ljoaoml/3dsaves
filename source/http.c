@@ -9,14 +9,20 @@
 #define HTTP_CHUNK_SIZE (64 * 1024)
 
 // Bundled root CA certs (DER), loaded from romfs at startup. These cover
-// Dropbox's current and recently-rotated TLS chains without depending on
-// the console's aging built-in cert list. See romfs/certs/README.md.
+// Dropbox's current/recently-rotated TLS chains plus the other major
+// public CAs (Google Trust Services for the Cloudflare relay's
+// *.workers.dev, Sectigo/USERTrust, Amazon) rather than depending on the
+// console's aging built-in cert list. See romfs/certs/README.md.
 static const char *const s_certFiles[] = {
     "romfs:/certs/isrg_root_x1.der",
     "romfs:/certs/digicert_global_root_g2.der",
     "romfs:/certs/digicert_global_root_g3.der",
     "romfs:/certs/digicert_tls_rsa4096_root_g5.der",
     "romfs:/certs/digicert_tls_ecc_p384_root_g5.der",
+    "romfs:/certs/gts_root_r1.der",
+    "romfs:/certs/gts_root_r4.der",
+    "romfs:/certs/usertrust_rsa.der",
+    "romfs:/certs/amazon_root_ca_1.der",
 };
 #define NUM_CERT_FILES (sizeof(s_certFiles) / sizeof(s_certFiles[0]))
 
