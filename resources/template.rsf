@@ -134,11 +134,12 @@ AccessControlInfo:
   # Service List -- trimmed to exactly what this app calls (see each
   # libctru *Init() call in source/): am (title listing), fs (saves +
   # SD I/O), gsp/hid/APT (graphics/input/applet, needed by every app),
-  # http (Dropbox networking), ps (PKCE random bytes), cfg (used
-  # internally by several libctru applet/service calls), ndm (network
-  # arbitration alongside http:C). No soc:U / ssl:C: httpc talks TLS
-  # itself over its own http:C handle, we never open sockets or an ssl:
-  # service connection directly (verified against libctru's httpc.c).
+  # ps (PKCE random bytes), cfg (used internally by several libctru
+  # applet/service calls), ndm (network arbitration alongside soc:u).
+  # soc:U replaces http:C -- the 3DS system httpc/TLS stack can't
+  # complete a handshake with modern servers, so networking is done over
+  # raw sockets + mbedTLS instead (see source/http.c). No ssl:C: TLS is
+  # handled entirely in-process by mbedTLS, not the system ssl: service.
   ServiceAccessControl:
    - APT:U
    - am:u
@@ -146,9 +147,9 @@ AccessControlInfo:
    - fs:USER
    - gsp::Gpu
    - hid:USER
-   - http:C
    - ndm:u
    - ps:ps
+   - soc:U
 
 
 SystemControlInfo:
@@ -163,6 +164,6 @@ SystemControlInfo:
     cfg: 0x0004013000001702
     gsp: 0x0004013000001c02
     hid: 0x0004013000001d02
-    http: 0x0004013000002902
     ndm: 0x0004013000002b02
     ps: 0x0004013000003102
+    socket: 0x0004013000002e02

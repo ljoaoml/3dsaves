@@ -107,13 +107,11 @@ int main(void) {
     ui_clear();
     ui_print_header("Konnect3DS - back up game saves to Dropbox");
 
-    // Temporary diagnostic: a plain HTTPS GET to a domain we're confident
-    // is NOT behind Cloudflare (www.dropbox.com serves via Dropbox's own
-    // "envoy" proxy, confirmed by response headers), to isolate whether
-    // basic HTTPS/cert-trust works on this build+console at all, versus
-    // something specific to Cloudflare's SNI-dependent edge (the current
-    // suspect for why the relay's *.workers.dev never validates even
-    // with a correct, verified root CA bundle). Remove once resolved.
+    // Temporary diagnostic: a plain HTTPS GET, to confirm on real hardware
+    // that the mbedTLS-over-sockets rewrite of http.c (replacing the
+    // 3DS system httpc/TLS stack, which cannot handshake with any modern
+    // server -- see romfs/certs/README.md) actually completes a TLS
+    // connection. Remove once confirmed working.
     {
         HttpResponse testResp;
         Result testRc = http_request(HTTPC_METHOD_GET, "https://www.dropbox.com/",

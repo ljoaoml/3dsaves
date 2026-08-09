@@ -1,7 +1,12 @@
 #---------------------------------------------------------------------------------
 # Konnect3DS - Nintendo 3DS homebrew save-to-cloud backup tool
 #
-# Requires devkitARM + libctru (devkitPro pacman package `3ds-dev`).
+# Requires devkitARM + libctru (devkitPro pacman package `3ds-dev`) plus
+# mbedTLS (devkitPro pacman package `3ds-mbedtls`, pulls in `3ds-zlib`):
+#                  (dkp-)pacman -S 3ds-mbedtls
+# The 3DS's own system httpc/TLS stack is too outdated to complete a
+# handshake with modern servers (see romfs/certs/README.md), so networking
+# is done over raw sockets (soc:u) + mbedTLS instead -- see source/http.c.
 # export DEVKITPRO=/opt/devkitpro ; export DEVKITARM=$DEVKITPRO/devkitARM
 #
 # `make`      -> Konnect3DS.3dsx (run via Homebrew Launcher, no extra tools)
@@ -54,13 +59,14 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	-lctru -lm
+LIBS	:=	-lmbedtls -lmbedx509 -lmbedcrypto -lctru -lz -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(CTRULIB)
+PORTLIBS	:=	$(DEVKITPRO)/portlibs/3ds
+LIBDIRS	:= $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional

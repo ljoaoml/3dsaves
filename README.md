@@ -42,6 +42,14 @@ scaffold):
   relay is needed (short version: the browser completing login runs on a
   phone, a different device than the 3DS, so a direct OAuth redirect to
   the 3DS isn't possible). Manual entry still works as a fallback.
+- **Every HTTPS request was failing TLS certificate verification**
+  (`rc=0xD8A0A03C`), against both the Cloudflare relay and Dropbox's own
+  servers, no matter which root CAs were bundled — root-caused to the
+  3DS system's own TLS stack being unable to handshake with modern
+  servers at all (even the native Internet Browser fails identically).
+  Fixed by rewriting `source/http.c` to do TLS itself, over raw sockets
+  (`soc:u`) + mbedTLS, instead of going through `httpc`/`ssl:C`. Not yet
+  confirmed on real hardware — see `main.c`'s startup self-test.
 
 ## What it does
 
@@ -69,18 +77,25 @@ scaffold):
 4. Uploads the zip to `/Konnect3DS/<PRODUCT-CODE>_<TITLEID>.zip` in the
    user's Dropbox via `POST /2/files/upload` (`source/dropbox.c`).
 
-Networking goes through libctru's `httpc` service (`source/http.c`), which
-handles TLS itself — no raw sockets / `soc:u` needed. A handful of modern
-root CA certs are bundled in `romfs/certs/` and trusted at runtime,
-because the console's built-in cert list is dated. See
-`romfs/certs/README.md` for why and how to refresh them.
+Networking (`source/http.c`) uses raw sockets (`soc:u`) + mbedTLS, not
+libctru's `httpc`/`ssl:C` service. The 3DS's own system TLS stack can't
+complete a handshake with any modern server at all — confirmed against
+both Dropbox's and Cloudflare's servers, and even the console's native
+Internet Browser fails the same way against google.com/dropbox.com with a
+generic "update your browser" error. This is a known, documented
+limitation (the same reason FBI ships its own TLS stack), not something
+fixable by adjusting which root CAs get trusted. The same bundled root CA
+set in `romfs/certs/` is still used, just parsed by mbedTLS instead of
+handed to httpc — see `romfs/certs/README.md` for how each one was
+verified.
 
 ## Building
 
 Requires [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the
-`3ds-dev` package group (devkitARM + libctru):
+`3ds-dev` package group (devkitARM + libctru) plus mbedTLS:
 
 ```sh
+(dkp-)pacman -S 3ds-mbedtls   # pulls in 3ds-zlib as a dependency
 export DEVKITPRO=/opt/devkitpro
 export DEVKITARM=$DEVKITPRO/devkitARM
 make
