@@ -106,6 +106,30 @@ int main(void) {
 
     ui_clear();
     ui_print_header("Konnect3DS - back up game saves to Dropbox");
+
+    // Temporary diagnostic: a plain HTTPS GET to a domain we're confident
+    // is NOT behind Cloudflare (www.dropbox.com serves via Dropbox's own
+    // "envoy" proxy, confirmed by response headers), to isolate whether
+    // basic HTTPS/cert-trust works on this build+console at all, versus
+    // something specific to Cloudflare's SNI-dependent edge (the current
+    // suspect for why the relay's *.workers.dev never validates even
+    // with a correct, verified root CA bundle). Remove once resolved.
+    {
+        HttpResponse testResp;
+        Result testRc = http_request(HTTPC_METHOD_GET, "https://www.dropbox.com/",
+                                      NULL, 0, NULL, 0, &testResp);
+        if (R_FAILED(testRc)) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "[selftest] dropbox.com: FAIL rc=0x%08lX\n", (unsigned long)testRc);
+            ui_print_error(msg);
+        } else {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "[selftest] dropbox.com: OK HTTP %lu\n", (unsigned long)testResp.status_code);
+            ui_print_success(msg);
+            http_response_free(&testResp);
+        }
+    }
+
     ui_print("Select a title on the bottom screen, or\n");
     ui_print("log in to Dropbox first if you haven't yet.\n");
     ui_flush();
