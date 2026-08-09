@@ -63,6 +63,15 @@ static const char *const s_certFiles[] = {
 #define HTTP_ERR_OOM          ((Result)(HTTP_ERR_BASE | 0x0004))
 #define HTTP_REDIRECT_SENTINEL ((Result)0x1)
 
+// Distinct synthetic "mbedtls error codes" (never real ones -- picked
+// well outside any real module's range) for our own deadline hits in
+// tls_connect/tls_write_all/tls_read_some, all of which would otherwise
+// collapse to the same MBEDTLS_ERR_SSL_TIMEOUT and be indistinguishable
+// from the printed rc alone.
+#define TLS_ERR_HANDSHAKE_TIMEOUT (-0x7001)
+#define TLS_ERR_WRITE_TIMEOUT     (-0x7002)
+#define TLS_ERR_READ_TIMEOUT      (-0x7003)
+
 static Result mbedtls_to_result(int mbedErr) {
     u32 code = (u32)((mbedErr < 0) ? -mbedErr : mbedErr) & 0xFFFF;
     return (Result)(HTTP_ERR_BASE | code);
@@ -286,7 +295,7 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
         u64 start = osGetTime();
         while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
             if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto fail;
-            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) { ret = MBEDTLS_ERR_SSL_TIMEOUT; goto fail; }
+            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) { ret = TLS_ERR_HANDSHAKE_TIMEOUT; goto fail; }
         }
     }
 
@@ -315,7 +324,7 @@ static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len) {
     while (off < len) {
         int ret = mbedtls_ssl_write(ssl, data + off, len - off);
         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) return MBEDTLS_ERR_SSL_TIMEOUT;
+            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) return TLS_ERR_WRITE_TIMEOUT;
             continue;
         }
         if (ret <= 0) return ret;
@@ -333,7 +342,7 @@ static int tls_read_some(mbedtls_ssl_context *ssl, u8 *buf, size_t len) {
         ret = mbedtls_ssl_read(ssl, buf, len);
         if ((ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) &&
             deadline_passed(start, HTTP_IO_TIMEOUT_MS)) {
-            return MBEDTLS_ERR_SSL_TIMEOUT;
+            return TLS_ERR_READ_TIMEOUT;
         }
     } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == MBEDTLS_ERR_NET_CONN_RESET) return 0;
