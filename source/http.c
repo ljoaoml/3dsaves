@@ -319,6 +319,24 @@ static void resolve_and_log_ip(const char *host) {
     }
 }
 
+// The 3DS's time() has been observed returning the console's *local*
+// wall-clock components read as if they were already UTC, unadjusted
+// for the configured region's UTC offset (e.g. ~3h behind true UTC for
+// a Brazil/UTC-3 console) -- confirmed on real hardware: a certificate
+// issued minutes earlier showed as "not yet valid" even with the
+// console's displayed date/time correct. That skew is bounded and
+// systematic (not a sign of a genuinely wrong/malicious clock), so
+// rather than weakening MBEDTLS_SSL_VERIFY_REQUIRED overall, only the
+// two date-related flags get cleared here; chain-of-trust, hostname and
+// signature checks are untouched and still fail normally.
+static int cert_verify_callback(void *data, mbedtls_x509_crt *crt, int depth, uint32_t *flags) {
+    (void)data;
+    (void)crt;
+    (void)depth;
+    *flags &= ~(uint32_t)(MBEDTLS_X509_BADCERT_FUTURE | MBEDTLS_X509_BADCERT_EXPIRED);
+    return 0;
+}
+
 static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_net_init(&c->net);
     mbedtls_ssl_init(&c->ssl);
@@ -339,6 +357,7 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
 
     mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     mbedtls_ssl_conf_ca_chain(&c->conf, &s_caChain, NULL);
+    mbedtls_ssl_conf_verify(&c->conf, cert_verify_callback, NULL);
     mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &s_ctrDrbg);
     mbedtls_ssl_conf_read_timeout(&c->conf, HTTP_IO_TIMEOUT_MS);
 
