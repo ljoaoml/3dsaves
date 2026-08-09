@@ -230,11 +230,23 @@ static const char *method_to_string(HTTPC_RequestMethod method) {
 
 // ---- TLS connection ----------------------------------------------------
 
+// Blocking sockets with no timeout can hang the whole app forever on a
+// stalled network op (no response, half-open connection, etc.) -- 3DS
+// apps have no OS-level "kill hung app" safety net, so this must be
+// bounded. HTTP_IO_TIMEOUT_MS caps every post-connect wait (TLS
+// handshake, write, read) via a wall-clock deadline checked around the
+// WANT_READ/WANT_WRITE retry loops.
+#define HTTP_IO_TIMEOUT_MS 15000
+
 typedef struct {
     mbedtls_net_context net;
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
 } TlsConn;
+
+static bool deadline_passed(u64 startMs, u32 timeoutMs) {
+    return (osGetTime() - startMs) > timeoutMs;
+}
 
 static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_net_init(&c->net);
@@ -255,6 +267,7 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     mbedtls_ssl_conf_ca_chain(&c->conf, &s_caChain, NULL);
     mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &s_ctrDrbg);
+    mbedtls_ssl_conf_read_timeout(&c->conf, HTTP_IO_TIMEOUT_MS);
 
     ret = mbedtls_ssl_setup(&c->ssl, &c->conf);
     if (ret != 0) goto fail;
@@ -262,10 +275,19 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
     ret = mbedtls_ssl_set_hostname(&c->ssl, host); // SNI + CN/SAN check target
     if (ret != 0) goto fail;
 
-    mbedtls_ssl_set_bio(&c->ssl, &c->net, mbedtls_net_send, mbedtls_net_recv, NULL);
+    // mbedtls_net_recv_timeout (select()-based, part of mbedtls itself --
+    // not relying on the platform's setsockopt(SO_RCVTIMEO) support, which
+    // isn't guaranteed here) bounds every read; combined with
+    // mbedtls_ssl_conf_read_timeout above, a stalled peer now surfaces as
+    // MBEDTLS_ERR_SSL_TIMEOUT instead of blocking forever.
+    mbedtls_ssl_set_bio(&c->ssl, &c->net, mbedtls_net_send, mbedtls_net_recv, mbedtls_net_recv_timeout);
 
-    while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto fail;
+    {
+        u64 start = osGetTime();
+        while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
+            if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto fail;
+            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) { ret = MBEDTLS_ERR_SSL_TIMEOUT; goto fail; }
+        }
     }
 
     return 0;
@@ -289,11 +311,16 @@ static void tls_close(TlsConn *c) {
 
 static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len) {
     size_t off = 0;
+    u64 start = osGetTime();
     while (off < len) {
         int ret = mbedtls_ssl_write(ssl, data + off, len - off);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) return MBEDTLS_ERR_SSL_TIMEOUT;
+            continue;
+        }
         if (ret <= 0) return ret;
         off += (size_t)ret;
+        start = osGetTime(); // reset the deadline on forward progress
     }
     return 0;
 }
@@ -301,8 +328,13 @@ static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len) {
 // >0 = bytes read, 0 = clean EOF, <0 = hard error
 static int tls_read_some(mbedtls_ssl_context *ssl, u8 *buf, size_t len) {
     int ret;
+    u64 start = osGetTime();
     do {
         ret = mbedtls_ssl_read(ssl, buf, len);
+        if ((ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) &&
+            deadline_passed(start, HTTP_IO_TIMEOUT_MS)) {
+            return MBEDTLS_ERR_SSL_TIMEOUT;
+        }
     } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == MBEDTLS_ERR_NET_CONN_RESET) return 0;
     return ret;
