@@ -361,6 +361,21 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &s_ctrDrbg);
     mbedtls_ssl_conf_read_timeout(&c->conf, HTTP_IO_TIMEOUT_MS);
 
+    // A `curl` from the same network/IP got a normal 200 from the exact
+    // same Cloudflare-fronted example.com that rejects this client with
+    // a raw 400 -- curl negotiated ALPN (offering h2/http1.1), this
+    // client didn't offer ALPN at all. Confirmed devkitPro's 3ds-mbedtls
+    // package doesn't patch out MBEDTLS_SSL_ALPN (only entropy.c and
+    // net_sockets.c are touched), so it's on by default same as
+    // upstream mbedTLS. Only offering "http/1.1", not "h2": this client
+    // only speaks HTTP/1.1 wire format, offering h2 and having the
+    // server pick it would break everything downstream.
+    {
+        static const char *alpnProtocols[] = { "http/1.1", NULL };
+        ret = mbedtls_ssl_conf_alpn_protocols(&c->conf, alpnProtocols);
+        if (ret != 0) goto fail;
+    }
+
     ret = mbedtls_ssl_setup(&c->ssl, &c->conf);
     if (ret != 0) goto fail;
 
