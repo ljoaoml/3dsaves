@@ -51,20 +51,44 @@ This prints your Worker's URL, something like:
 https://konnect3ds-oauth-relay.<your-subdomain>.workers.dev
 ```
 
+### Using a custom domain instead of *.workers.dev (recommended)
+
+`*.workers.dev` is a shared namespace heavily abused for phishing/malware,
+so Cloudflare's edge polices it far more aggressively than a real domain
+-- real-hardware testing hit this directly: the 3DS's `/poll` requests
+got a raw `400 Bad Request` straight from Cloudflare's edge (not from
+this Worker's code -- confirmed via the app's `http_debug.log`, which
+showed a complete, correctly-formed HTTP/1.1 request), while the exact
+same TLS client had no trouble at all talking to Dropbox's own API or a
+plain non-Cloudflare site. Point the Worker at any domain already on
+your Cloudflare account instead and this class of problem goes away:
+
+1. Cloudflare dashboard -> **Workers & Pages** -> your worker
+   (`konnect3ds-oauth-relay`) -> **Settings** -> **Domains & Routes** ->
+   **Add** -> **Custom Domain**. Enter a subdomain of a zone already on
+   your account, e.g. `konnect3ds.yourdomain.com`, and add it --
+   Cloudflare provisions the DNS record and certificate automatically
+   (takes a minute or two).
+2. Continue with "Wire it into the app" below, using
+   `https://konnect3ds.yourdomain.com` in place of the `*.workers.dev`
+   URL everywhere.
+
 ### Wire it into the app
 
 1. In the [Dropbox App Console](https://www.dropbox.com/developers/apps),
    open your app -> **Settings** -> **OAuth 2** -> **Redirect URIs**, and
    add:
    ```
-   https://konnect3ds-oauth-relay.<your-subdomain>.workers.dev/callback
+   https://<your worker's domain>/callback
    ```
    (exact match required, including `/callback` -- Dropbox does not
-   support wildcards here).
-2. In `include/auth.h`, set `RELAY_BASE_URL` to your Worker's URL
-   (without a trailing slash), e.g.:
+   support wildcards here). This can be either the `*.workers.dev` URL
+   `wrangler deploy` printed, or the custom domain from above -- keeping
+   both registered is fine, no need to remove the old one.
+2. In `include/auth.h`, set `RELAY_BASE_URL` to that same URL (without a
+   trailing slash), e.g.:
    ```c
-   #define RELAY_BASE_URL "https://konnect3ds-oauth-relay.your-subdomain.workers.dev"
+   #define RELAY_BASE_URL "https://konnect3ds.yourdomain.com"
    ```
    or pass it at build time like `DROPBOX_CLIENT_ID`:
    ```sh

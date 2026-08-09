@@ -22,8 +22,18 @@
 // cloudflare-relay/README.md for how to deploy your own. If left as the
 // placeholder below, login falls back to manual code entry (the original
 // no-redirect-URI flow) instead of polling.
+//
+// A custom domain, not *.workers.dev: real-hardware testing showed the
+// 3DS's /poll requests getting a raw "400 Bad Request" straight from
+// Cloudflare's edge (confirmed via sdmc:/3ds/Konnect3DS/http_debug.log --
+// the request itself was a complete, well-formed HTTP/1.1 GET, byte
+// count matched exactly), even though the exact same client succeeds
+// against api.dropboxapi.com and example.com. *.workers.dev is a shared,
+// heavily-abused namespace that Cloudflare polices far more
+// aggressively than a real domain -- see cloudflare-relay/README.md's
+// "Using a custom domain" section for how to set one up.
 #ifndef RELAY_BASE_URL
-#define RELAY_BASE_URL "https://konnect3ds-oauth-relay.ljoaomarcosalves.workers.dev"
+#define RELAY_BASE_URL "https://konnect3ds.vgchampions.org"
 #endif
 
 #define DROPBOX_TOKEN_FILE "sdmc:/3ds/Konnect3DS/dropbox_token.txt"
