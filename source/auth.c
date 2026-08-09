@@ -214,6 +214,7 @@ bool auth_run_login_flow(DropboxTokens *out) {
     bool wantManualEntry = false;
     int frame = 0;
 
+    RelayPollResult lastReported = RELAY_PENDING;
     while (!haveCode && !cancelled && !wantManualEntry) {
         qr_draw_frame(qr);
 
@@ -235,9 +236,15 @@ bool auth_run_login_flow(DropboxTokens *out) {
                 ui_print("\n");
                 ui_wait_for_a();
                 return false;
+            } else if (pr == RELAY_UNAVAILABLE && lastReported != RELAY_UNAVAILABLE) {
+                // Report this once (not every poll) so a broken relay
+                // connection is visible instead of just waiting forever
+                // indistinguishably from "still pending".
+                ui_print_bottom("(can't reach relay right now, still trying...)\n");
+            } else if (pr == RELAY_PENDING && lastReported == RELAY_UNAVAILABLE) {
+                ui_print_bottom("(reached the relay again)\n");
             }
-            // PENDING or UNAVAILABLE (relay unreachable this round): just
-            // keep waiting -- the user can still press A for manual entry.
+            lastReported = pr;
         }
         frame++;
         gspWaitForVBlank();
