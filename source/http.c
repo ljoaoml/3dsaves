@@ -85,9 +85,19 @@ static bool s_httpInited = false;
 static int s_certFileCount = 0;   // .der files actually read from romfs
 static int s_certParsedCount = 0; // of those, how many mbedtls accepted
 
+// Set at the start of every do_single_request() so a caller that gets a
+// timeout/error back can tell "request never even went out", "request
+// went out but zero bytes of response ever came back" and "some response
+// bytes arrived, then it stalled" apart -- these look identical from the
+// Result code alone but point at very different problems.
+static int s_lastRequestBytesSent = -1;
+static int s_lastResponseBytesReceived = -1;
+
 int http_get_loaded_cert_count(void) { return s_certFileCount; }
 int http_get_total_cert_count(void) { return (int)NUM_CERT_FILES; }
 int http_get_last_trusted_count(void) { return s_certParsedCount; }
+int http_get_last_request_bytes_sent(void) { return s_lastRequestBytesSent; }
+int http_get_last_response_bytes_received(void) { return s_lastResponseBytesReceived; }
 
 Result http_init(void) {
     s_socBuffer = (u32 *)memalign(SOC_ALIGN, SOC_BUFFER_SIZE);
@@ -325,19 +335,29 @@ static void tls_close(TlsConn *c) {
     mbedtls_net_free(&c->net);
 }
 
-static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len) {
+// sentOut (optional) gets how many bytes actually went out even on
+// failure, so a caller can tell "nothing was ever sent" from "most of
+// the request went out, then it stalled/failed".
+static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, size_t *sentOut) {
     size_t off = 0;
     u64 start = osGetTime();
     while (off < len) {
         int ret = mbedtls_ssl_write(ssl, data + off, len - off);
         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) return TLS_ERR_WRITE_TIMEOUT;
+            if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) {
+                if (sentOut) *sentOut = off;
+                return TLS_ERR_WRITE_TIMEOUT;
+            }
             continue;
         }
-        if (ret <= 0) return ret;
+        if (ret <= 0) {
+            if (sentOut) *sentOut = off;
+            return ret;
+        }
         off += (size_t)ret;
         start = osGetTime(); // reset the deadline on forward progress
     }
+    if (sentOut) *sentOut = off;
     return 0;
 }
 
@@ -446,6 +466,9 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
                                  const u8 *body, u32 body_size,
                                  char *redirect_out, size_t redirect_out_size,
                                  HttpResponse *out) {
+    s_lastRequestBytesSent = -1;
+    s_lastResponseBytesReceived = -1;
+
     ParsedUrl pu;
     if (!parse_url(url, &pu) || !pu.https) return HTTP_ERR_BAD_URL;
 
@@ -487,7 +510,9 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
         return rc;
     }
 
-    int wret = tls_write_all(&conn.ssl, req.data, req.size);
+    size_t sent = 0;
+    int wret = tls_write_all(&conn.ssl, req.data, req.size, &sent);
+    s_lastRequestBytesSent = (int)sent;
     free(req.data);
     if (wret != 0) {
         tls_close(&conn);
@@ -497,11 +522,13 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     // Read the whole response (we always send Connection: close, so
     // reading until EOF is enough -- no need to track Content-Length to
     // know when to stop).
+    s_lastResponseBytesReceived = 0;
     HttpBuffer raw = {0};
     u8 chunk[HTTP_RECV_CHUNK];
     for (;;) {
         int got = tls_read_some(&conn.ssl, chunk, sizeof(chunk));
         if (got > 0) {
+            s_lastResponseBytesReceived += got;
             rc = buffer_append(&raw, chunk, (u32)got);
             if (R_FAILED(rc)) { free(raw.data); tls_close(&conn); return rc; }
             continue;

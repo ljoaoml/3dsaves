@@ -34,6 +34,17 @@ int http_get_loaded_cert_count(void);
 int http_get_total_cert_count(void);
 int http_get_last_trusted_count(void);
 
+// Diagnostics for the most recent request's TLS write/read progress, set
+// at the start of every request (before the connection attempt) and
+// updated as it goes: -1 means "never got that far" (e.g. request bytes
+// sent stays -1 if the handshake itself never completed), 0+ is an
+// actual byte count. Lets a failing request be told apart as "nothing
+// was ever sent", "sent fine but zero bytes of response ever came back"
+// (looks identical to a hung connection from the Result code alone) or
+// "some response arrived, then it stalled".
+int http_get_last_request_bytes_sent(void);
+int http_get_last_response_bytes_received(void);
+
 // Performs a single HTTPS request, following redirects (up to 5 hops).
 // `body`/`body_size` may be NULL/0 for methods without a request body.
 // On success fills `out` (caller must call http_response_free when done).

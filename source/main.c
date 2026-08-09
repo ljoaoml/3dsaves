@@ -109,6 +109,9 @@ static void selftest_https(const char *label, const char *url) {
     if (R_FAILED(testRc)) {
         snprintf(msg, sizeof(msg), "[selftest] %s: FAIL rc=0x%08lX\n", label, (unsigned long)testRc);
         ui_print_error(msg);
+        snprintf(msg, sizeof(msg), "  sent %d bytes, got %d bytes back\n",
+                 http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
+        ui_print(msg);
     } else {
         snprintf(msg, sizeof(msg), "[selftest] %s: OK HTTP %lu\n", label, (unsigned long)testResp.status_code);
         ui_print_success(msg);
