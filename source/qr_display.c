@@ -1,26 +1,29 @@
 #include "qr_display.h"
 #include "qrcodegen.h"
+#include "ui.h"
 
 #include <3ds.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #define SCREEN_W 400
 #define SCREEN_H 240
 
+// The Dropbox authorize URL is ~190 bytes, which needs roughly QR version
+// 11-13 at low error correction -- version 20 is a comfortable ceiling
+// that keeps the buffer (and qrcodegen's internal work) well under 1.2KB
+// instead of the ~3.9KB qrcodegen_BUFFER_LEN_MAX (version 40) allows for.
+#define QR_MAX_VERSION 20
+#define QR_BUFFER_LEN qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)
+
 // Pixel format/indexing verified against a known-working raw-framebuffer
 // example (efairbanks/3ds-graphics-test, source/main.cpp): default format
-// from gfxInitDefault() is BGR8 (3 bytes/pixel), and despite the top
-// screen's framebuffer being reported as 240(w) x 400(h) by
-// gfxGetFramebuffer (the 90-degree-rotated raw layout), the correct index
-// for on-screen (x,y) with x in [0,400) and y in [0,240) is simply:
+// from gfxInitDefault() is BGR8 (3 bytes/pixel); despite the top screen's
+// framebuffer being reported as 240(w) x 400(h) by gfxGetFramebuffer (the
+// 90-degree-rotated raw layout), the correct index for on-screen (x,y)
+// with x in [0,400), y in [0,240) is:
 //   idx = (x * SCREEN_H + y) * 3
-// An earlier version of this file used (SCREEN_H - 1 - y) to "un-flip" it
-// and additionally called gfxSetDoubleBuffering(GFX_TOP, false) before
-// drawing -- that combination produced a scrambled/garbled screen on real
-// hardware. Removed the double-buffering toggle entirely and just redraw
-// every frame while waiting (like the reference does for its animation),
-// which keeps both of the double-buffered framebuffers correctly painted
-// instead of relying on only one of them being "the" visible one.
 static void put_pixel(u8 *fb, int x, int y, u8 r, u8 g, u8 b) {
     if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
     int idx = (x * SCREEN_H + y) * 3;
@@ -50,15 +53,44 @@ static void draw_qr_frame(const uint8_t *qr, int size, int scale, int originX, i
 }
 
 int qr_display_and_wait(const char *text) {
-    uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
-    uint8_t tempBuffer[qrcodegen_BUFFER_LEN_MAX];
+    // qrcodegen's own buffers are ~3.9KB each (qrcodegen_BUFFER_LEN_MAX);
+    // ~8KB combined is small in absolute terms, but a homebrew thread's
+    // default stack can be small enough that two of these plus whatever
+    // the caller's own call chain already used gets close to the edge.
+    // Heap-allocating them removes stack size as a variable entirely --
+    // a real (and cheap to rule out) suspect given the QR came out
+    // corrupted identically both as a .3dsx and as a .cia, which pointed
+    // away from anything screen/permission-specific and toward something
+    // that corrupts the QR's *input data* before drawing even starts.
+    uint8_t *qr = malloc(QR_BUFFER_LEN);
+    uint8_t *tempBuffer = malloc(QR_BUFFER_LEN);
+    if (!qr || !tempBuffer) {
+        free(qr);
+        free(tempBuffer);
+        return -1;
+    }
 
     bool ok = qrcodegen_encodeText(text, tempBuffer, qr, qrcodegen_Ecc_LOW,
-                                    qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
+                                    qrcodegen_VERSION_MIN, QR_MAX_VERSION,
                                     qrcodegen_Mask_AUTO, true);
-    if (!ok) return -1;
+    free(tempBuffer);
+
+    if (!ok) {
+        free(qr);
+        return -1;
+    }
 
     int size = qrcodegen_getSize(qr);
+
+    // Sanity print on the bottom screen: if this is ever obviously wrong
+    // (not roughly 20-80), the corruption is happening before drawing.
+    ui_printf_bottom("(QR: %d modules)\n", size);
+
+    if (size < 1 || size > 177) { // 177 = qrcodegen's absolute max (version 40)
+        free(qr);
+        return -1;
+    }
+
     int scale = SCREEN_H / (size + 8); // leave ~4 modules of margin per side
     if (scale < 1) scale = 1;
     int qrPixels = size * scale;
@@ -79,5 +111,6 @@ int qr_display_and_wait(const char *text) {
         gspWaitForVBlank();
     }
 
+    free(qr);
     return result;
 }
