@@ -57,6 +57,8 @@ void auth_delete_tokens(void);
 bool auth_run_login_flow(DropboxTokens *out);
 
 // Refreshes the access token using the stored refresh token if it looks
-// expired (or unconditionally if force_refresh is true). Updates `tokens`
-// and the on-disk copy in place.
-bool auth_ensure_valid(DropboxTokens *tokens);
+// expired (or unconditionally if force_refresh is true -- worth passing
+// explicitly rather than trusting expires_at_unix alone, since the 3DS's
+// own clock is not reliably UTC, see main.c's startup diagnostic).
+// Updates `tokens` and the on-disk copy in place.
+bool auth_ensure_valid(DropboxTokens *tokens, bool force_refresh);

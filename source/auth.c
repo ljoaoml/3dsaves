@@ -330,11 +330,13 @@ bool auth_run_login_flow(DropboxTokens *out) {
     return ok;
 }
 
-bool auth_ensure_valid(DropboxTokens *tokens) {
+bool auth_ensure_valid(DropboxTokens *tokens, bool force_refresh) {
     if (!tokens->valid || strlen(tokens->refresh_token) == 0) return false;
 
-    u64 now = (u64)time(NULL);
-    if (tokens->expires_at_unix > now) return true; // still fresh
+    if (!force_refresh) {
+        u64 now = (u64)time(NULL);
+        if (tokens->expires_at_unix > now) return true; // still fresh
+    }
 
     char body[512];
     int bodyLen = snprintf(body, sizeof(body),
