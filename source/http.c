@@ -700,12 +700,31 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     return 0;
 }
 
-// Overwritten on every request, not appended -- the login screen polls
-// the relay every ~2s while waiting, so an append-mode log would grow
-// without bound. Only the most recent request is available this way, but
-// that's normally exactly the one that just failed. Kept at the
-// http_request() level (not inside do_single_request(), which has many
-// internal return points) so one call site covers every outcome.
+// One numbered log file per app launch (http_debug_1.log, _2.log, ...),
+// tracked via a small counter file so a fresh test run always gets a new
+// file without having to manually delete the old one first. Overwritten
+// on every request *within* that file, not appended -- the login screen
+// polls the relay every ~2s while waiting, so a new file (or appending)
+// per request would flood the SD card with dozens of near-identical
+// files during a single wait. Only the most recent request in the
+// current run is available this way, but that's normally exactly the
+// one that just failed.
+static int next_log_number(void) {
+    int n = 0;
+    FILE *f = fopen("sdmc:/3ds/Konnect3DS/http_debug_seq.txt", "rb");
+    if (f) {
+        if (fscanf(f, "%d", &n) != 1) n = 0;
+        fclose(f);
+    }
+    n++;
+    f = fopen("sdmc:/3ds/Konnect3DS/http_debug_seq.txt", "wb");
+    if (f) { fprintf(f, "%d", n); fclose(f); }
+    return n;
+}
+
+// Kept at the http_request() level (not inside do_single_request(),
+// which has many internal return points) so one call site covers every
+// outcome.
 //
 // Dumps s_lastRawRequest verbatim (the actual bytes written to the wire,
 // captured in do_single_request()) rather than reconstructing an
@@ -717,7 +736,12 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
 // SD card, so this doesn't add a new exposure -- just keep in mind this
 // file contains the same secrets before handing the SD card to anyone.
 static void write_debug_log(const char *url, Result rc, const HttpResponse *out) {
-    FILE *f = fopen("sdmc:/3ds/Konnect3DS/http_debug.log", "wb");
+    static int s_logNumber = -1;
+    if (s_logNumber < 0) s_logNumber = next_log_number();
+
+    char path[64];
+    snprintf(path, sizeof(path), "sdmc:/3ds/Konnect3DS/http_debug_%d.log", s_logNumber);
+    FILE *f = fopen(path, "wb");
     if (!f) return;
 
     fprintf(f, "URL: %s\n", url);

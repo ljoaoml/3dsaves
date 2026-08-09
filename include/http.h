@@ -49,11 +49,12 @@ int http_get_last_response_bytes_received(void);
 // version/cipher suite got negotiated (or "?" if not gotten that far).
 // Lets a real-hardware result be compared directly against e.g.
 // `openssl s_client` run from a PC on the same network. Every request
-// also writes sdmc:/3ds/Konnect3DS/http_debug.log with this plus the actual
-// request/response headers and bodies (Authorization header redacted),
-// overwritten each time -- check it after any request that fails in a
-// way that's hard to diagnose from just the Result code and these
-// getters.
+// also writes sdmc:/3ds/Konnect3DS/http_debug_<N>.log (a fresh <N> each
+// app launch, so a new test run never needs the old file deleted first;
+// overwritten in place for every request within that same run) with this
+// plus the exact request/response bytes -- check the highest-numbered
+// one after anything that fails in a way that's hard to diagnose from
+// just the Result code and these getters.
 const char *http_get_last_resolved_ip(void);
 const char *http_get_last_tls_version(void);
 const char *http_get_last_tls_cipher(void);
