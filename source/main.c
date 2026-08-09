@@ -10,7 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define TMP_ZIP_PATH "sdmc:/Konnect3DS/_tmp_backup.zip"
+#define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
 
 typedef struct {
     InstalledTitle *titles;
@@ -127,7 +127,8 @@ int main(void) {
     romfsInit();
     http_init();
 
-    mkdir("sdmc:/Konnect3DS", 0777);
+    mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
+    mkdir("sdmc:/3ds/Konnect3DS", 0777);
 
     DropboxTokens tokens;
     MenuState state = {0};

@@ -692,7 +692,7 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
 // internal return points) so one call site covers every outcome.
 static void write_debug_log(const char *url, const HttpHeader *headers, int header_count,
                              const u8 *body, u32 body_size, Result rc, const HttpResponse *out) {
-    FILE *f = fopen("sdmc:/Konnect3DS/http_debug.log", "wb");
+    FILE *f = fopen("sdmc:/3ds/Konnect3DS/http_debug.log", "wb");
     if (!f) return;
 
     fprintf(f, "URL: %s\n", url);
