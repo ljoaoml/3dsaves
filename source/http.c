@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
 
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
@@ -92,12 +95,22 @@ static int s_certParsedCount = 0; // of those, how many mbedtls accepted
 // Result code alone but point at very different problems.
 static int s_lastRequestBytesSent = -1;
 static int s_lastResponseBytesReceived = -1;
+// Which IP the hostname actually resolved to, and what TLS version/cipher
+// got negotiated -- lets a real-hardware test be compared directly
+// against e.g. `openssl s_client` run from a PC on the same network,
+// instead of having to guess whether they even hit the same server.
+static char s_lastResolvedIp[16] = "";
+static char s_lastTlsVersion[32] = "";
+static char s_lastTlsCipher[64] = "";
 
 int http_get_loaded_cert_count(void) { return s_certFileCount; }
 int http_get_total_cert_count(void) { return (int)NUM_CERT_FILES; }
 int http_get_last_trusted_count(void) { return s_certParsedCount; }
 int http_get_last_request_bytes_sent(void) { return s_lastRequestBytesSent; }
 int http_get_last_response_bytes_received(void) { return s_lastResponseBytesReceived; }
+const char *http_get_last_resolved_ip(void) { return s_lastResolvedIp[0] ? s_lastResolvedIp : "?"; }
+const char *http_get_last_tls_version(void) { return s_lastTlsVersion[0] ? s_lastTlsVersion : "?"; }
+const char *http_get_last_tls_cipher(void) { return s_lastTlsCipher[0] ? s_lastTlsCipher : "?"; }
 
 Result http_init(void) {
     s_socBuffer = (u32 *)memalign(SOC_ALIGN, SOC_BUFFER_SIZE);
@@ -267,10 +280,32 @@ static bool deadline_passed(u64 startMs, u32 timeoutMs) {
     return (osGetTime() - startMs) > timeoutMs;
 }
 
+// Best-effort, for diagnostics only: does its own separate DNS lookup
+// just to have a human-readable IP to show/log (mbedtls_net_connect()
+// does its own internal lookup and doesn't hand the resolved address
+// back to the caller). If there are multiple A records this might not
+// be the exact one mbedtls_net_connect ends up using, but in the common
+// single-A-record case it is.
+static void resolve_and_log_ip(const char *host) {
+    s_lastResolvedIp[0] = '\0';
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; // 3DS soc:u is IPv4-only
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) == 0 && res) {
+        struct sockaddr_in *sa = (struct sockaddr_in *)(void *)res->ai_addr;
+        inet_ntop(AF_INET, &sa->sin_addr, s_lastResolvedIp, sizeof(s_lastResolvedIp));
+        freeaddrinfo(res);
+    }
+}
+
 static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_net_init(&c->net);
     mbedtls_ssl_init(&c->ssl);
     mbedtls_ssl_config_init(&c->conf);
+
+    resolve_and_log_ip(host);
 
     char portStr[8];
     snprintf(portStr, sizeof(portStr), "%d", port);
@@ -314,6 +349,12 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
             if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto fail;
             if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) { ret = TLS_ERR_HANDSHAKE_TIMEOUT; goto fail; }
         }
+    }
+
+    snprintf(s_lastTlsVersion, sizeof(s_lastTlsVersion), "%s", mbedtls_ssl_get_version(&c->ssl));
+    {
+        const char *cipher = mbedtls_ssl_get_ciphersuite(&c->ssl);
+        snprintf(s_lastTlsCipher, sizeof(s_lastTlsCipher), "%s", cipher ? cipher : "?");
     }
 
     return 0;
@@ -461,6 +502,10 @@ static bool header_line_value(const char *line, const char *name, char *out, siz
     return true;
 }
 
+static bool header_name_is(const char *name, const char *target) {
+    return starts_with_ci(name, target) && name[strlen(target)] == '\0';
+}
+
 static Result do_single_request(HTTPC_RequestMethod method, const char *url,
                                  const HttpHeader *headers, int header_count,
                                  const u8 *body, u32 body_size,
@@ -468,6 +513,8 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
                                  HttpResponse *out) {
     s_lastRequestBytesSent = -1;
     s_lastResponseBytesReceived = -1;
+    s_lastTlsVersion[0] = '\0';
+    s_lastTlsCipher[0] = '\0';
 
     ParsedUrl pu;
     if (!parse_url(url, &pu) || !pu.https) return HTTP_ERR_BAD_URL;
@@ -617,6 +664,47 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     return 0;
 }
 
+// Overwritten on every request, not appended -- the login screen polls
+// the relay every ~2s while waiting, so an append-mode log would grow
+// without bound. Only the most recent request is available this way, but
+// that's normally exactly the one that just failed. Kept at the
+// http_request() level (not inside do_single_request(), which has many
+// internal return points) so one call site covers every outcome.
+static void write_debug_log(const char *url, const HttpHeader *headers, int header_count,
+                             const u8 *body, u32 body_size, Result rc, const HttpResponse *out) {
+    FILE *f = fopen("sdmc:/Konnect3DS/http_debug.log", "wb");
+    if (!f) return;
+
+    fprintf(f, "URL: %s\n", url);
+    fprintf(f, "Resolved IP: %s\n", http_get_last_resolved_ip());
+    fprintf(f, "TLS: %s %s\n", http_get_last_tls_version(), http_get_last_tls_cipher());
+    fprintf(f, "Bytes sent: %d, bytes received: %d\n",
+            http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
+    fprintf(f, "Result: 0x%08lX\n\n", (unsigned long)rc);
+
+    fprintf(f, "--- Request (headers/body as given to http_request(), not exact wire bytes) ---\n");
+    for (int i = 0; i < header_count; i++) {
+        if (header_name_is(headers[i].name, "Authorization")) {
+            fprintf(f, "%s: [redacted]\n", headers[i].name);
+        } else {
+            fprintf(f, "%s: %s\n", headers[i].name, headers[i].value);
+        }
+    }
+    if (body && body_size > 0) {
+        fprintf(f, "\n--- Request body (%lu bytes) ---\n", (unsigned long)body_size);
+        fwrite(body, 1, body_size, f);
+        fprintf(f, "\n");
+    }
+
+    if (R_SUCCEEDED(rc) && out && out->body.data) {
+        fprintf(f, "\n--- Response body (%lu bytes) ---\n", (unsigned long)out->body.size);
+        fwrite(out->body.data, 1, out->body.size, f);
+        fprintf(f, "\n");
+    }
+
+    fclose(f);
+}
+
 Result http_request(HTTPC_RequestMethod method, const char *url,
                      const HttpHeader *headers, int header_count,
                      const u8 *body, u32 body_size,
@@ -636,8 +724,10 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
             snprintf(currentUrl, sizeof(currentUrl), "%s", location);
             continue;
         }
+        write_debug_log(currentUrl, headers, header_count, body, body_size, rc, out);
         return rc;
     }
+    write_debug_log(currentUrl, headers, header_count, body, body_size, HTTP_ERR_TOO_MANY_REDIRECTS, out);
     return HTTP_ERR_TOO_MANY_REDIRECTS;
 }
 
