@@ -111,18 +111,27 @@ int main(void) {
     // that the mbedTLS-over-sockets rewrite of http.c (replacing the
     // 3DS system httpc/TLS stack, which cannot handshake with any modern
     // server -- see romfs/certs/README.md) actually completes a TLS
-    // connection. Remove once confirmed working.
+    // connection. Targets api.dropboxapi.com, not www.dropbox.com: that's
+    // the domain the app actually talks to (token exchange/refresh); the
+    // www.dropbox.com login page only ever opens in the phone's browser,
+    // this app never fetches it, so testing against it was checking the
+    // wrong thing (and dropbox.com's front end may have anti-bot TLS
+    // fingerprinting that api.dropboxapi.com doesn't). Remove once
+    // confirmed working.
     {
+        ui_print("Testing connection to Dropbox...\n");
+        ui_flush(); // otherwise nothing shows on screen while this blocks
+
         HttpResponse testResp;
-        Result testRc = http_request(HTTPC_METHOD_GET, "https://www.dropbox.com/",
+        Result testRc = http_request(HTTPC_METHOD_GET, "https://api.dropboxapi.com/",
                                       NULL, 0, NULL, 0, &testResp);
         if (R_FAILED(testRc)) {
             char msg[64];
-            snprintf(msg, sizeof(msg), "[selftest] dropbox.com: FAIL rc=0x%08lX\n", (unsigned long)testRc);
+            snprintf(msg, sizeof(msg), "[selftest] api.dropboxapi.com: FAIL rc=0x%08lX\n", (unsigned long)testRc);
             ui_print_error(msg);
         } else {
             char msg[64];
-            snprintf(msg, sizeof(msg), "[selftest] dropbox.com: OK HTTP %lu\n", (unsigned long)testResp.status_code);
+            snprintf(msg, sizeof(msg), "[selftest] api.dropboxapi.com: OK HTTP %lu\n", (unsigned long)testResp.status_code);
             ui_print_success(msg);
             http_response_free(&testResp);
         }
