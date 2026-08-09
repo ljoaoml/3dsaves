@@ -1,4 +1,4 @@
-# 3dsaves OAuth relay
+# Konnect3DS OAuth relay
 
 A tiny Cloudflare Worker that lets the 3DS log in to Dropbox **without
 typing the authorization code by hand**.
@@ -48,7 +48,7 @@ wrangler deploy
 This prints your Worker's URL, something like:
 
 ```
-https://3dsaves-oauth-relay.<your-subdomain>.workers.dev
+https://konnect3ds-oauth-relay.<your-subdomain>.workers.dev
 ```
 
 ### Wire it into the app
@@ -57,14 +57,14 @@ https://3dsaves-oauth-relay.<your-subdomain>.workers.dev
    open your app -> **Settings** -> **OAuth 2** -> **Redirect URIs**, and
    add:
    ```
-   https://3dsaves-oauth-relay.<your-subdomain>.workers.dev/callback
+   https://konnect3ds-oauth-relay.<your-subdomain>.workers.dev/callback
    ```
    (exact match required, including `/callback` -- Dropbox does not
    support wildcards here).
 2. In `include/auth.h`, set `RELAY_BASE_URL` to your Worker's URL
    (without a trailing slash), e.g.:
    ```c
-   #define RELAY_BASE_URL "https://3dsaves-oauth-relay.your-subdomain.workers.dev"
+   #define RELAY_BASE_URL "https://konnect3ds-oauth-relay.your-subdomain.workers.dev"
    ```
    or pass it at build time like `DROPBOX_CLIENT_ID`:
    ```sh

@@ -10,7 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define TMP_ZIP_PATH "sdmc:/3dsaves/_tmp_backup.zip"
+#define TMP_ZIP_PATH "sdmc:/Konnect3DS/_tmp_backup.zip"
 
 typedef struct {
     InstalledTitle *titles;
@@ -70,7 +70,7 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     ui_flush();
 
     char dropboxPath[128];
-    snprintf(dropboxPath, sizeof(dropboxPath), "/3dsaves/%s_%016llX.zip",
+    snprintf(dropboxPath, sizeof(dropboxPath), "/Konnect3DS/%s_%016llX.zip",
               t->productCode[0] ? t->productCode : "UNKNOWN",
               (unsigned long long)t->titleId);
 
@@ -96,7 +96,7 @@ int main(void) {
     romfsInit();
     http_init();
 
-    mkdir("sdmc:/3dsaves", 0777);
+    mkdir("sdmc:/Konnect3DS", 0777);
 
     DropboxTokens tokens;
     MenuState state = {0};
@@ -105,14 +105,14 @@ int main(void) {
     refresh_titles(&state);
 
     ui_clear();
-    ui_print_header("3dsaves - back up game saves to Dropbox");
+    ui_print_header("Konnect3DS - back up game saves to Dropbox");
     ui_print("Select a title on the bottom screen, or\n");
     ui_print("log in to Dropbox first if you haven't yet.\n");
     ui_flush();
 
     while (aptMainLoop()) {
         int total = 3 + (int)state.titleCount;
-        int choice = ui_run_menu("3dsaves", total, menu_label, &state);
+        int choice = ui_run_menu("Konnect3DS", total, menu_label, &state);
 
         if (choice < 0) break; // B on the top-level menu = quit
 

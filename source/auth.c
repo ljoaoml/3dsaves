@@ -116,7 +116,7 @@ bool auth_load_tokens(DropboxTokens *tokens) {
 }
 
 bool auth_save_tokens(const DropboxTokens *tokens) {
-    mkdir("sdmc:/3dsaves", 0777);
+    mkdir("sdmc:/Konnect3DS", 0777);
     FILE *f = fopen(DROPBOX_TOKEN_FILE, "wb");
     if (!f) return false;
     fprintf(f, "access_token=%s\n", tokens->access_token);

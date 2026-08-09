@@ -1,11 +1,11 @@
 #---------------------------------------------------------------------------------
-# 3dsaves - Nintendo 3DS homebrew save-to-cloud backup tool
+# Konnect3DS - Nintendo 3DS homebrew save-to-cloud backup tool
 #
 # Requires devkitARM + libctru (devkitPro pacman package `3ds-dev`).
 # export DEVKITPRO=/opt/devkitpro ; export DEVKITARM=$DEVKITPRO/devkitARM
 #
-# `make`      -> 3dsaves.3dsx (run via Homebrew Launcher, no extra tools)
-# `make cia`  -> 3dsaves.cia (install with FBI). Needs makerom + bannertool,
+# `make`      -> Konnect3DS.3dsx (run via Homebrew Launcher, no extra tools)
+# `make cia`  -> Konnect3DS.cia (install with FBI). Needs makerom + bannertool,
 #                which come from devkitPro's `general-tools` pacman package:
 #                  (dkp-)pacman -S general-tools
 #---------------------------------------------------------------------------------
@@ -28,7 +28,7 @@ include $(DEVKITARM)/3ds_rules
 # RESOURCES holds the CIA-only metadata: AppInfo (title/author/ids) and
 #   template.rsf (permissions), plus icon.png/banner.png/audio.wav
 #---------------------------------------------------------------------------------
-TARGET		:=	3dsaves
+TARGET		:=	Konnect3DS
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data

@@ -26,7 +26,7 @@
 #define RELAY_BASE_URL "PUT_YOUR_RELAY_URL_HERE"
 #endif
 
-#define DROPBOX_TOKEN_FILE "sdmc:/3dsaves/dropbox_token.txt"
+#define DROPBOX_TOKEN_FILE "sdmc:/Konnect3DS/dropbox_token.txt"
 
 typedef struct {
     char access_token[512];

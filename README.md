@@ -1,4 +1,4 @@
-# 3dsaves
+# Konnect3DS
 
 A Nintendo 3DS homebrew app that backs up a game's save data to Dropbox.
 
@@ -66,7 +66,7 @@ scaffold):
    flow, where Dropbox shows a code you type back in via the 3DS software
    keyboard (`source/auth.c`). No client secret is embedded in the binary
    either way.
-4. Uploads the zip to `/3dsaves/<PRODUCT-CODE>_<TITLEID>.zip` in the
+4. Uploads the zip to `/Konnect3DS/<PRODUCT-CODE>_<TITLEID>.zip` in the
    user's Dropbox via `POST /2/files/upload` (`source/dropbox.c`).
 
 Networking goes through libctru's `httpc` service (`source/http.c`), which
@@ -86,7 +86,7 @@ export DEVKITARM=$DEVKITPRO/devkitARM
 make
 ```
 
-Produces `3dsaves.3dsx` (+ `.smdh`). Copy it to `/3ds/3dsaves/` on the SD
+Produces `Konnect3DS.3dsx` (+ `.smdh`). Copy it to `/3ds/Konnect3DS/` on the SD
 card and launch via Homebrew Launcher — **`.3dsx` is not something FBI
 installs**, it just runs directly from that launcher.
 
@@ -99,7 +99,7 @@ Needs two extra tools that aren't part of the base `3ds-dev` group:
 make cia
 ```
 
-Produces `3dsaves.cia`. Copy it to the SD card and install it with FBI
+Produces `Konnect3DS.cia`. Copy it to the SD card and install it with FBI
 like any other CIA — it'll get a real HOME menu icon (a plain generated
 placeholder icon/banner for now, see `resources/`).
 
@@ -108,7 +108,7 @@ placeholder icon/banner for now, see `resources/`).
 1. Go to the [Dropbox App Console](https://www.dropbox.com/developers/apps)
    and create an app:
    - API: **Scoped access**
-   - Access type: **App folder** (simplest — keeps it to `/Apps/3dsaves`)
+   - Access type: **App folder** (simplest — keeps it to `/Apps/Konnect3DS`)
      or **Full Dropbox** if you'd rather control the path yourself.
    - Under **Permissions**, enable `files.content.write` and
      `files.content.read`.
