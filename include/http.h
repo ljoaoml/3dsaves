@@ -59,6 +59,11 @@ const char *http_get_last_resolved_ip(void);
 const char *http_get_last_tls_version(void);
 const char *http_get_last_tls_cipher(void);
 
+// If the most recent request failed specifically because the server's
+// TLS certificate didn't verify, this is mbedTLS's human-readable reason
+// why (untrusted CA, expired, hostname mismatch, ...) -- "?" otherwise.
+const char *http_get_last_verify_info(void);
+
 // Performs a single HTTPS request, following redirects (up to 5 hops).
 // `body`/`body_size` may be NULL/0 for methods without a request body.
 // On success fills `out` (caller must call http_response_free when done).

@@ -102,6 +102,12 @@ static int s_lastResponseBytesReceived = -1;
 static char s_lastResolvedIp[16] = "";
 static char s_lastTlsVersion[32] = "";
 static char s_lastTlsCipher[64] = "";
+// Human-readable reason a certificate got rejected (expired, untrusted
+// CA, hostname mismatch, ...), from mbedtls_x509_crt_verify_info() --
+// MBEDTLS_ERR_X509_CERT_VERIFY_FAILED alone doesn't say which of those
+// it was, and that's exactly what's needed to tell "this CA isn't in
+// our bundle" apart from "this cert isn't valid yet/anymore".
+static char s_lastVerifyInfo[256] = "";
 // The exact bytes actually written to the wire for the most recent
 // request, captured right after it's built (whether or not sending it
 // then succeeds) -- write_debug_log() dumps this verbatim instead of
@@ -120,6 +126,7 @@ int http_get_last_response_bytes_received(void) { return s_lastResponseBytesRece
 const char *http_get_last_resolved_ip(void) { return s_lastResolvedIp[0] ? s_lastResolvedIp : "?"; }
 const char *http_get_last_tls_version(void) { return s_lastTlsVersion[0] ? s_lastTlsVersion : "?"; }
 const char *http_get_last_tls_cipher(void) { return s_lastTlsCipher[0] ? s_lastTlsCipher : "?"; }
+const char *http_get_last_verify_info(void) { return s_lastVerifyInfo[0] ? s_lastVerifyInfo : "?"; }
 
 Result http_init(void) {
     s_socBuffer = (u32 *)memalign(SOC_ALIGN, SOC_BUFFER_SIZE);
@@ -374,6 +381,17 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
 fail:
     {
         Result rc = mbedtls_to_result(ret);
+        if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+            // Only meaningful once a cert was actually received and
+            // checked -- calling this for any other failure reason
+            // risks reading uninitialized/absent verify state.
+            uint32_t vrfy = mbedtls_ssl_get_verify_result(&c->ssl);
+            if (vrfy != 0 && vrfy != 0xFFFFFFFF) {
+                mbedtls_x509_crt_verify_info(s_lastVerifyInfo, sizeof(s_lastVerifyInfo), "", vrfy);
+                size_t len = strlen(s_lastVerifyInfo);
+                if (len > 0 && s_lastVerifyInfo[len - 1] == '\n') s_lastVerifyInfo[len - 1] = '\0';
+            }
+        }
         mbedtls_ssl_free(&c->ssl);
         mbedtls_ssl_config_free(&c->conf);
         mbedtls_net_free(&c->net);
@@ -523,6 +541,7 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     s_lastResponseBytesReceived = -1;
     s_lastTlsVersion[0] = '\0';
     s_lastTlsCipher[0] = '\0';
+    s_lastVerifyInfo[0] = '\0';
     free(s_lastRawRequest.data);
     s_lastRawRequest.data = NULL;
     s_lastRawRequest.size = 0;
@@ -747,6 +766,7 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     fprintf(f, "URL: %s\n", url);
     fprintf(f, "Resolved IP: %s\n", http_get_last_resolved_ip());
     fprintf(f, "TLS: %s %s\n", http_get_last_tls_version(), http_get_last_tls_cipher());
+    fprintf(f, "Cert verify: %s\n", http_get_last_verify_info());
     fprintf(f, "Bytes sent: %d, bytes received: %d\n",
             http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
     fprintf(f, "Result: 0x%08lX\n\n", (unsigned long)rc);
