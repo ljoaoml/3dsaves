@@ -19,7 +19,7 @@
 // PKCE verifier), so guessing someone else's in-flight state to poison or
 // read their entry isn't practical.
 
-const CODE_TTL_SECONDS = 300; // 5 minutes -- a login attempt shouldn't take longer than this
+const CODE_TTL_SECONDS = 900; // 15 minutes -- generous headroom for a real first-time login (signing into Dropbox, 2FA, etc.)
 
 function htmlPage(title, message, ok, code) {
   const color = ok ? "#1a7f37" : "#cf222e";
