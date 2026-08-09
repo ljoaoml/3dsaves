@@ -29,13 +29,19 @@ scaffold):
 - `makerom`/`bannertool` aren't in any devkitPro pacman package (despite
   `general-tools` sounding like it should have them) -- they're separate
   manual downloads, documented below.
-- **QR code was scrambled on real hardware**: `qr_display.c` disabled
-  double buffering before drawing, which corrupted the display. Fixed by
-  removing that entirely and instead redrawing every frame while waiting
-  (like every other verified-working raw-framebuffer 3DS example does),
-  so both of the double-buffered screen's framebuffers stay correctly
-  painted. Also matched the pixel-index formula to a verified working
-  reference exactly instead of the unverified guess used before.
+- **QR code was scrambled on real hardware**, through several rounds of
+  debugging: disabling double buffering before drawing (removed, redraw
+  every frame instead), oversized stack buffers in the QR encoder (moved
+  to the heap), and finally the real fix -- explicitly forcing
+  `GSP_BGR8_OES` instead of trusting whatever pixel format this devkitPro
+  version defaults to. Confirmed rendering correctly on real hardware
+  after that.
+- **Login no longer requires typing a code at all**, if `cloudflare-relay/`
+  is deployed: Dropbox redirects there instead of displaying the code, and
+  the 3DS polls it automatically. See that project's README for why a
+  relay is needed (short version: the browser completing login runs on a
+  phone, a different device than the 3DS, so a direct OAuth redirect to
+  the 3DS isn't possible). Manual entry still works as a fallback.
 
 ## What it does
 
@@ -48,16 +54,18 @@ scaffold):
 2. Reads the selected title's `SAVEDATA` archive recursively and packs it
    into a `.zip` (stored, no compression) on the SD card
    (`source/saves.c`, `source/minizip_writer.c`).
-3. Logs in to Dropbox using OAuth 2.0 Authorization Code + PKCE, with the
-   *no-redirect-URI* variant Dropbox supports for apps that can't receive
-   an HTTP redirect. The authorize URL is shown as a QR code drawn
-   directly to the top screen's framebuffer (`source/qr_display.c`, using
-   a vendored copy of [nayuki/QR-Code-generator](https://github.com/nayuki/QR-Code-generator),
-   MIT-licensed) so you scan it with a phone instead of typing a ~190
-   character URL by hand; the plain-text URL still prints on the bottom
-   screen as a fallback. After approving on Dropbox, the authorization
-   code it shows is typed back in via the 3DS software keyboard
-   (`source/auth.c`). No client secret is embedded in the binary.
+3. Logs in to Dropbox using OAuth 2.0 Authorization Code + PKCE. The
+   authorize URL is shown as a QR code drawn directly to the top screen's
+   framebuffer (`source/qr_display.c`, using a vendored copy of
+   [nayuki/QR-Code-generator](https://github.com/nayuki/QR-Code-generator),
+   MIT-licensed) so you scan it with a phone instead of typing a long URL
+   by hand; the plain-text URL still prints on the bottom screen as a
+   fallback. If `cloudflare-relay/` is deployed and configured (see its
+   README), login finishes automatically once you approve on Dropbox --
+   no code to type at all. Otherwise it falls back to the no-redirect-URI
+   flow, where Dropbox shows a code you type back in via the 3DS software
+   keyboard (`source/auth.c`). No client secret is embedded in the binary
+   either way.
 4. Uploads the zip to `/3dsaves/<PRODUCT-CODE>_<TITLEID>.zip` in the
    user's Dropbox via `POST /2/files/upload` (`source/dropbox.c`).
 
@@ -112,12 +120,31 @@ placeholder icon/banner for now, see `resources/`).
    ```
    No app secret is needed (PKCE flow).
 
+## Optional: no-typing login via the Cloudflare relay
+
+By default, logging in means typing a Dropbox-generated code on the 3DS's
+software keyboard once. `cloudflare-relay/` removes that step entirely --
+see its README for what it does and why, and for full deploy steps. Once
+deployed:
+
+1. Add `<your-worker-url>/callback` as a Redirect URI in the Dropbox App
+   Console (**Settings** -> **OAuth 2** -> **Redirect URIs**) -- required,
+   Dropbox rejects unregistered ones.
+2. Set `RELAY_BASE_URL` in `include/auth.h` (or via `-DRELAY_BASE_URL=...`
+   at build time, same as `DROPBOX_CLIENT_ID`) to your Worker's URL.
+3. Rebuild.
+
+Skip this and leave `RELAY_BASE_URL` as the placeholder to keep the
+original manual-code-entry flow -- it still works fine, just needs that
+one bit of typing.
+
 ## Using it
 
 - On first run, select **Log in to Dropbox**, scan the QR code on the top
   screen with your phone (or type the URL printed on the bottom screen
-  manually), approve access, then press A on the 3DS and paste the code
-  Dropbox shows you.
+  manually), and approve access. If the Cloudflare relay is set up, that's
+  it -- the 3DS picks up the login on its own within a couple seconds.
+  Otherwise, press A on the 3DS and paste the code Dropbox shows you.
 - Pick a title from the list and it backs up + uploads immediately.
   Titles show their real name when available, falling back to product
   code + title ID otherwise.
@@ -148,9 +175,8 @@ placeholder icon/banner for now, see `resources/`).
   by hand; swapping in DEFLATE (devkitPro's `zlib` portlib) would shrink
   uploads if that ever matters.
 - **One provider (Dropbox).** Google Drive and OneDrive were the other
-  candidates discussed; both support a real OAuth device-code flow (nicer
-  than Dropbox's copy/paste code), so if a second provider gets added,
-  start there and give `auth.c`/`dropbox.c` a shared interface first.
+  candidates discussed; if a second provider gets added, give
+  `auth.c`/`dropbox.c` a shared interface first.
 - **No restore path yet** — this only backs up. Restoring would mean the
   reverse: download from Dropbox, unzip, and write files back into the
   `SAVEDATA` archive, then `FSUSER_ControlArchive` commit if the archive
@@ -170,4 +196,7 @@ romfs/      bundled read-only assets (root CA certs), embedded in both
 resources/  CIA-only: AppInfo (title/author/ids), template.rsf
             (permissions), icon.png/banner.png/audio.wav (placeholder art)
 Makefile    devkitARM build rules (`make` -> .3dsx, `make cia` -> .cia)
+cloudflare-relay/
+            optional Cloudflare Worker that lets login finish without
+            typing a code -- see its own README
 ```

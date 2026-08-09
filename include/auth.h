@@ -15,6 +15,17 @@
 #define DROPBOX_CLIENT_ID "xxd9vkjyoedihll"
 #endif
 
+// Base URL (no trailing slash) of the OAuth relay in cloudflare-relay/,
+// used so the 3DS doesn't need the code typed in by hand: Dropbox
+// redirects the phone's browser to <RELAY_BASE_URL>/callback, and the 3DS
+// polls <RELAY_BASE_URL>/poll until the code shows up. See
+// cloudflare-relay/README.md for how to deploy your own. If left as the
+// placeholder below, login falls back to manual code entry (the original
+// no-redirect-URI flow) instead of polling.
+#ifndef RELAY_BASE_URL
+#define RELAY_BASE_URL "PUT_YOUR_RELAY_URL_HERE"
+#endif
+
 #define DROPBOX_TOKEN_FILE "sdmc:/3dsaves/dropbox_token.txt"
 
 typedef struct {

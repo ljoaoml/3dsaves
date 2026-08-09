@@ -39,6 +39,57 @@ static void make_pkce_pair(char verifier_out[128], char challenge_out[128]) {
     base64url_encode(hash, sizeof(hash), challenge_out); // 43 chars
 }
 
+// Unrelated to the PKCE pair -- just a random correlation id for the
+// relay (see cloudflare-relay/), so it knows which in-flight login a
+// polling request belongs to. Base64url output needs no URL-encoding.
+static void make_state_token(char out[64]) {
+    uint8_t randomBytes[24];
+    if (!random_bytes(randomBytes, sizeof(randomBytes))) {
+        srand((unsigned)osGetTime() ^ 0x5A5A5A5A);
+        for (size_t i = 0; i < sizeof(randomBytes); i++) randomBytes[i] = (uint8_t)rand();
+    }
+    base64url_encode(randomBytes, sizeof(randomBytes), out); // 32 chars
+}
+
+typedef enum {
+    RELAY_PENDING,
+    RELAY_READY,
+    RELAY_ERROR,
+    RELAY_UNAVAILABLE,
+} RelayPollResult;
+
+// Asks cloudflare-relay/ whether Dropbox has redirected the code back yet
+// for this login attempt (`state`). See that project's README for why
+// this exists: the 3DS can't receive an OAuth redirect itself since the
+// browser completing the login runs on a different device (the phone).
+static RelayPollResult poll_relay(const char *state, char *codeOut, size_t codeOutSize,
+                                   char *errorOut, size_t errorOutSize) {
+    char url[512];
+    snprintf(url, sizeof(url), "%s/poll?state=%s", RELAY_BASE_URL, state);
+
+    HttpResponse resp;
+    Result rc = http_request(HTTPC_METHOD_GET, url, NULL, 0, NULL, 0, &resp);
+    if (R_FAILED(rc)) return RELAY_UNAVAILABLE;
+
+    RelayPollResult result = RELAY_UNAVAILABLE;
+    if (resp.status_code == 200 && resp.body.data) {
+        char status[16] = {0};
+        const char *json = (const char *)resp.body.data;
+        if (json_get_string(json, "status", status, sizeof(status))) {
+            if (strcmp(status, "ready") == 0 && json_get_string(json, "code", codeOut, codeOutSize)) {
+                result = RELAY_READY;
+            } else if (strcmp(status, "pending") == 0) {
+                result = RELAY_PENDING;
+            } else if (strcmp(status, "error") == 0) {
+                json_get_string(json, "error", errorOut, errorOutSize);
+                result = RELAY_ERROR;
+            }
+        }
+    }
+    http_response_free(&resp);
+    return result;
+}
+
 bool auth_load_tokens(DropboxTokens *tokens) {
     memset(tokens, 0, sizeof(*tokens));
     FILE *f = fopen(DROPBOX_TOKEN_FILE, "rb");
@@ -105,11 +156,33 @@ bool auth_run_login_flow(DropboxTokens *out) {
     char verifier[128], challenge[128];
     make_pkce_pair(verifier, challenge);
 
-    char url[768];
-    snprintf(url, sizeof(url),
-             "%s?client_id=%s&response_type=code&code_challenge=%s"
-             "&code_challenge_method=S256&token_access_type=offline",
-             DROPBOX_AUTHORIZE_URL, DROPBOX_CLIENT_ID, challenge);
+    // If a relay (cloudflare-relay/) is configured, use a real redirect_uri
+    // so the login can complete without the user typing anything on the
+    // 3DS -- see include/auth.h and cloudflare-relay/README.md. Otherwise
+    // fall back to the original no-redirect-URI flow (manual code entry).
+    bool useRelay = strcmp(RELAY_BASE_URL, "PUT_YOUR_RELAY_URL_HERE") != 0;
+    char state[64] = {0};
+
+    char url[1024];
+    if (useRelay) {
+        make_state_token(state);
+        char redirectUri[256];
+        snprintf(redirectUri, sizeof(redirectUri), "%s/callback", RELAY_BASE_URL);
+        char encodedRedirectUri[512];
+        http_url_encode(redirectUri, encodedRedirectUri, sizeof(encodedRedirectUri));
+
+        snprintf(url, sizeof(url),
+                 "%s?client_id=%s&response_type=code&code_challenge=%s"
+                 "&code_challenge_method=S256&token_access_type=offline"
+                 "&redirect_uri=%s&state=%s",
+                 DROPBOX_AUTHORIZE_URL, DROPBOX_CLIENT_ID, challenge,
+                 encodedRedirectUri, state);
+    } else {
+        snprintf(url, sizeof(url),
+                 "%s?client_id=%s&response_type=code&code_challenge=%s"
+                 "&code_challenge_method=S256&token_access_type=offline",
+                 DROPBOX_AUTHORIZE_URL, DROPBOX_CLIENT_ID, challenge);
+    }
 
     ui_clear();
     ui_clear_bottom();
@@ -117,40 +190,75 @@ bool auth_run_login_flow(DropboxTokens *out) {
     ui_print_bottom("1. Scan the QR code on the TOP screen\n");
     ui_print_bottom("   with your phone's camera.\n");
     ui_print_bottom("2. Log in and click Allow.\n");
-    ui_print_bottom("3. Copy the code Dropbox shows you.\n");
-    ui_print_bottom("4. Press A here to type it in.\n\n");
+    if (useRelay) {
+        ui_print_bottom("3. That's it -- this continues on its\n");
+        ui_print_bottom("   own once you approve.\n");
+        ui_print_bottom("   (A = type a code in manually instead,\n");
+        ui_print_bottom("   e.g. if it shows on the confirmation\n");
+        ui_print_bottom("   page but doesn't continue on its own)\n\n");
+    } else {
+        ui_print_bottom("3. Copy the code Dropbox shows you.\n");
+        ui_print_bottom("4. Press A here to type it in.\n\n");
+    }
     ui_print_bottom("(B to cancel)\n\n");
     ui_print_bottom("Can't scan? Full URL:\n");
     ui_print_bottom(url);
     ui_print_bottom("\n");
     ui_flush();
 
-    int qrResult = qr_display_and_wait(url);
-    if (qrResult == 0) return false; // user pressed B
-    if (qrResult == -1) {
-        // QR generation failed (shouldn't happen for a normal-length URL) --
-        // fall back to the plain-text URL already shown on the bottom
-        // screen and let A/B drive the same confirm/cancel choice.
-        while (true) {
-            hidScanInput();
-            u32 kDown = hidKeysDown();
-            if (kDown & KEY_A) break;
-            if (kDown & KEY_B) return false;
-            gspWaitForVBlank();
+    QrCode *qr = qr_prepare(url);
+
+    char code[256] = {0};
+    bool haveCode = false;
+    bool cancelled = false;
+    bool wantManualEntry = false;
+    int frame = 0;
+
+    while (!haveCode && !cancelled && !wantManualEntry) {
+        qr_draw_frame(qr);
+
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        if (kDown & KEY_B) { cancelled = true; break; }
+        if (kDown & KEY_A) { wantManualEntry = true; break; }
+
+        if (useRelay && frame > 0 && frame % 120 == 0) { // ~every 2s at 60fps
+            char relayError[128] = {0};
+            RelayPollResult pr = poll_relay(state, code, sizeof(code), relayError, sizeof(relayError));
+            if (pr == RELAY_READY) {
+                haveCode = true;
+            } else if (pr == RELAY_ERROR) {
+                qr_free(qr);
+                ui_clear();
+                ui_print_error("Dropbox login failed: ");
+                ui_print_error(relayError[0] ? relayError : "unknown error");
+                ui_print("\n");
+                ui_wait_for_a();
+                return false;
+            }
+            // PENDING or UNAVAILABLE (relay unreachable this round): just
+            // keep waiting -- the user can still press A for manual entry.
         }
+        frame++;
+        gspWaitForVBlank();
     }
 
-    // qr_display_and_wait drew straight to the top screen's framebuffer,
-    // bypassing the console entirely -- clear it properly now so the
-    // console's own state (and the framebuffer) are back to normal before
-    // we print anything through it again.
+    qr_free(qr);
+
+    if (cancelled) return false;
+
+    // Drew straight to the top screen's framebuffer, bypassing the
+    // console entirely -- clear it properly now so the console's own
+    // state (and the framebuffer) are back to normal before we print
+    // anything through it again.
     ui_clear();
     ui_flush();
 
-    char code[256] = {0};
-    if (!swkbd_get_text("Paste the Dropbox authorization code", code, sizeof(code)) ||
-        strlen(code) == 0) {
-        return false;
+    if (!haveCode) {
+        if (!swkbd_get_text("Paste the Dropbox authorization code", code, sizeof(code)) ||
+            strlen(code) == 0) {
+            return false;
+        }
     }
 
     char encodedCode[512], encodedVerifier[256];

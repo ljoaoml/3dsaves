@@ -1,11 +1,19 @@
 #pragma once
 
-// Draws a QR code of `text` directly to the top screen's framebuffer (not
-// through the text console) and waits for a button press. Used so the
-// Dropbox OAuth URL -- too long to type from the 3DS's tiny screen -- can
-// just be scanned with a phone camera instead.
-//
-// Returns 1 if the user pressed A, 0 if they pressed B (cancel), or -1 if
-// the QR code couldn't be generated at all (caller should fall back to
-// showing the URL as plain text only).
-int qr_display_and_wait(const char *text);
+// Draws a QR code directly to the top screen's framebuffer (not through
+// the text console). Split into prepare/draw-one-frame/free so a caller
+// can redraw it every loop iteration while also doing other work (like
+// polling a server) in between frames, instead of blocking entirely.
+
+typedef struct QrCode QrCode;
+
+// Encodes `text` as a QR code. Returns NULL if it couldn't be encoded
+// (caller should fall back to not showing a QR at all).
+QrCode *qr_prepare(const char *text);
+
+// Draws one frame of the QR to the top screen and presents it. Call this
+// every iteration of your own loop (it needs to be redrawn every frame
+// because the top screen is double-buffered -- see qr_display.c).
+void qr_draw_frame(const QrCode *qr);
+
+void qr_free(QrCode *qr);

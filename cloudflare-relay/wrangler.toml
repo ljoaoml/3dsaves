@@ -1,0 +1,9 @@
+name = "3dsaves-oauth-relay"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Created by `wrangler kv namespace create CODES` -- paste the returned id
+# below (see cloudflare-relay/README.md for the full setup steps).
+kv_namespaces = [
+  { binding = "CODES", id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+]
