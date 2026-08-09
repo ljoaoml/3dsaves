@@ -1,6 +1,7 @@
 #include "http.h"
 #include <3ds.h>
 #include <3ds/services/soc.h>
+#include <malloc.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -303,7 +304,7 @@ static int tls_read_some(mbedtls_ssl_context *ssl, u8 *buf, size_t len) {
     do {
         ret = mbedtls_ssl_read(ssl, buf, len);
     } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
-    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == MBEDTLS_ERR_SSL_CONN_RESET) return 0;
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == MBEDTLS_ERR_NET_CONN_RESET) return 0;
     return ret;
 }
 
