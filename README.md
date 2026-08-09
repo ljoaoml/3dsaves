@@ -10,26 +10,41 @@ rely on — see the CIA permission note under "Known rough edges" below.
 
 ## Status
 
-Compiles clean (`.3dsx`) as of the latest fixes below. The `.cia` build
-path was written against real working templates (Checkpoint's RSF, the
-classic `3ds-template` Makefile) but hasn't actually been run through
-`make cia` yet — see "Known rough edges" for the one part of it
-(the FS permission list) that most needs on-hardware verification.
+Both `.3dsx` and `.cia` compile clean. On-hardware testing (real 3DS,
+via a user, not this session -- no devkitARM/3DS available here) has
+caught and fixed real bugs, most notably a scrambled QR code caused by
+a wrong raw-framebuffer draw (see the fix note below and in
+`source/qr_display.c`) -- treat anything not explicitly confirmed working
+below as still needing a look.
 
-Fixes applied while getting the first build green (kept here so it's
-obvious what changed since the initial scaffold, not because the code
-still needs work):
+Fixes applied while getting the build green and iterating on real
+hardware (kept here so it's obvious what changed since the initial
+scaffold):
 - `ARCH` flags updated for current devkitARM/GCC (`-mtype=thumb
   -mthumb-interwork` were removed upstream; now `-mtp=soft`).
 - Missing `#include <stdio.h>` / `<stddef.h>` in `include/http.h` /
   `include/dropbox.h` (used `FILE`/`size_t` without including them).
 - `_3DSXDEPS` was referenced but never defined, so the `.smdh` icon never
   actually got built before `3dsxtool` tried to embed it.
+- `makerom`/`bannertool` aren't in any devkitPro pacman package (despite
+  `general-tools` sounding like it should have them) -- they're separate
+  manual downloads, documented below.
+- **QR code was scrambled on real hardware**: `qr_display.c` disabled
+  double buffering before drawing, which corrupted the display. Fixed by
+  removing that entirely and instead redrawing every frame while waiting
+  (like every other verified-working raw-framebuffer 3DS example does),
+  so both of the double-buffered screen's framebuffers stay correctly
+  painted. Also matched the pixel-index formula to a verified working
+  reference exactly instead of the unverified guess used before.
 
 ## What it does
 
 1. Lists installed titles (SD + inserted cartridge) that look like regular
-   games (`source/saves.c`).
+   games (`source/saves.c`), showing each one's actual name (read from its
+   SMDH via `ARCHIVE_SAVEDATA_AND_CONTENT`, `source/title_name.c`,
+   technique adapted from [selloa/3DS-Random-Game-Launcher](https://github.com/selloa/3DS-Random-Game-Launcher),
+   MIT-licensed) instead of just a product code, falling back to the
+   product code + title ID if a title has no readable SMDH.
 2. Reads the selected title's `SAVEDATA` archive recursively and packs it
    into a `.zip` (stored, no compression) on the SD card
    (`source/saves.c`, `source/minizip_writer.c`).
@@ -104,10 +119,8 @@ placeholder icon/banner for now, see `resources/`).
   manually), approve access, then press A on the 3DS and paste the code
   Dropbox shows you.
 - Pick a title from the list and it backs up + uploads immediately.
-- Titles are listed by product code and title ID (e.g. `CTR-P-AREE`)
-  rather than a friendly game name — resolving the SMDH icon/title info
-  would need reading the NCCH header, which is a reasonable follow-up
-  (see below).
+  Titles show their real name when available, falling back to product
+  code + title ID otherwise.
 
 ## Known rough edges / follow-ups
 
@@ -115,21 +128,14 @@ placeholder icon/banner for now, see `resources/`).
   declares `CategorySystemApplication` in `FileSystemAccess` specifically so
   a properly-installed CIA (not run through the Homebrew Launcher exploit,
   which already has broad FS access regardless of any RSF) can open other
-  titles' `SAVEDATA` archives. Whether this is sufficient depends partly on
-  what your CFW (e.g. Luma3DS) patches system-wide — if `.cia` save backup
-  fails with a permission error on real hardware, this list is the first
-  place to check.
-- **`.3dsx` end-to-end still needs a real backup+upload test.** It compiles
-  and should run/list titles, but a full "pick a title, upload, check
-  Dropbox" pass hasn't been confirmed on hardware yet.
-- **QR code drawing is new, untested territory.** `source/qr_display.c`
-  writes raw pixels straight to the top screen's framebuffer (bypassing
-  the text console), using the standard-but-easy-to-get-backwards 3DS
-  formula for the screen's 90°-rotated memory layout
-  (`x*240+(239-y)`, BGR8, 3 bytes/pixel). If the code shows up scrambled,
-  mirrored, or sideways on real hardware, that formula/pixel format is the
-  first thing to check — everything else (console text) is unaffected
-  since it's drawn through the normal `PrintConsole` path, not this.
+  titles' `SAVEDATA` and `ARCHIVE_SAVEDATA_AND_CONTENT` (used for title
+  names) archives. Whether this is sufficient depends partly on what your
+  CFW (e.g. Luma3DS) patches system-wide — if `.cia` save backup or title
+  names fail with a permission error on real hardware, this list is the
+  first place to check.
+- **`.3dsx` end-to-end still needs a real backup+upload test.** Title
+  listing, the QR login flow, and the UI have been confirmed on real
+  hardware; a full "pick a title, upload, check Dropbox" pass hasn't yet.
 - **`EXTDATA`-only titles aren't handled**, only `SAVEDATA`
   (`ARCHIVE_USER_SAVEDATA`). Some titles keep save data in extdata
   instead/as well; adding that archive type is a moderate amount of
@@ -154,7 +160,9 @@ placeholder icon/banner for now, see `resources/`).
 
 ```
 source/     application code (.c), plus a vendored copy of nayuki's
-            qrcodegen (MIT license, embedded in the file header)
+            qrcodegen (MIT license, embedded in the file header) and an
+            SMDH-reading technique adapted from 3DS-Random-Game-Launcher
+            (MIT, credited in title_name.c)
 include/    headers (.h)
 romfs/      bundled read-only assets (root CA certs), embedded in both
             the .3dsx (via 3dsxtool --romfs) and the .cia (via the RSF's

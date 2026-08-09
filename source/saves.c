@@ -1,5 +1,6 @@
 #include "saves.h"
 #include "minizip_writer.h"
+#include "title_name.h"
 
 #include <3ds.h>
 #include <3ds/util/utf.h>
@@ -43,6 +44,9 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         t->mediaType = mediatype;
         memset(t->productCode, 0, sizeof(t->productCode));
         AM_GetTitleProductCode(mediatype, ids[i], t->productCode);
+        // Best-effort: leaves t->name empty if the title has no readable
+        // SMDH, callers fall back to showing the product code instead.
+        title_get_name(ids[i], mediatype, t->name, sizeof(t->name));
         (*count)++;
     }
 

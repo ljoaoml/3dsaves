@@ -30,10 +30,14 @@ static const char *menu_label(int index, void *userdata) {
 
     int titleIndex = index - 3;
     InstalledTitle *t = &state->titles[titleIndex];
-    snprintf(buf, sizeof(buf), "%s (%s) [%016llX]",
-             t->productCode[0] ? t->productCode : "????",
-             t->mediaType == MEDIATYPE_SD ? "SD" : "Cart",
-             (unsigned long long)t->titleId);
+    const char *mediaLabel = t->mediaType == MEDIATYPE_SD ? "SD" : "Cart";
+    if (t->name[0]) {
+        snprintf(buf, sizeof(buf), "%s (%s)", t->name, mediaLabel);
+    } else {
+        snprintf(buf, sizeof(buf), "%s (%s) [%016llX]",
+                 t->productCode[0] ? t->productCode : "????",
+                 mediaLabel, (unsigned long long)t->titleId);
+    }
     return buf;
 }
 
@@ -48,9 +52,8 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     InstalledTitle *t = &state->titles[titleIndex];
 
     ui_clear();
-    ui_printf("Backing up %s [%016llX]...\n",
-              t->productCode[0] ? t->productCode : "unknown title",
-              (unsigned long long)t->titleId);
+    ui_printf("Backing up %s...\n",
+              t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "unknown title"));
     ui_flush();
 
     Result rc = saves_backup_title(t, TMP_ZIP_PATH);
