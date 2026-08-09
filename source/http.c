@@ -102,6 +102,15 @@ static int s_lastResponseBytesReceived = -1;
 static char s_lastResolvedIp[16] = "";
 static char s_lastTlsVersion[32] = "";
 static char s_lastTlsCipher[64] = "";
+// The exact bytes actually written to the wire for the most recent
+// request, captured right after it's built (whether or not sending it
+// then succeeds) -- write_debug_log() dumps this verbatim instead of
+// reconstructing an approximation from http_request()'s parameters,
+// since the reconstruction can't see headers added internally (Host,
+// User-Agent, ...) and a byte-for-byte mismatch is exactly the kind of
+// thing worth ruling in or out when a server claims a request is
+// malformed.
+static HttpBuffer s_lastRawRequest = {0};
 
 int http_get_loaded_cert_count(void) { return s_certFileCount; }
 int http_get_total_cert_count(void) { return (int)NUM_CERT_FILES; }
@@ -167,6 +176,9 @@ void http_exit(void) {
     mbedtls_entropy_free(&s_entropy);
     if (s_httpInited) socExit();
     if (s_socBuffer) { free(s_socBuffer); s_socBuffer = NULL; }
+    free(s_lastRawRequest.data);
+    s_lastRawRequest.data = NULL;
+    s_lastRawRequest.size = 0;
     s_httpInited = false;
 }
 
@@ -502,10 +514,6 @@ static bool header_line_value(const char *line, const char *name, char *out, siz
     return true;
 }
 
-static bool header_name_is(const char *name, const char *target) {
-    return starts_with_ci(name, target) && name[strlen(target)] == '\0';
-}
-
 static Result do_single_request(HTTPC_RequestMethod method, const char *url,
                                  const HttpHeader *headers, int header_count,
                                  const u8 *body, u32 body_size,
@@ -515,6 +523,9 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     s_lastResponseBytesReceived = -1;
     s_lastTlsVersion[0] = '\0';
     s_lastTlsCipher[0] = '\0';
+    free(s_lastRawRequest.data);
+    s_lastRawRequest.data = NULL;
+    s_lastRawRequest.size = 0;
 
     ParsedUrl pu;
     if (!parse_url(url, &pu) || !pu.https) return HTTP_ERR_BAD_URL;
@@ -576,6 +587,11 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
         tls_close(&conn);
         return rc;
     }
+
+    free(s_lastRawRequest.data);
+    s_lastRawRequest.data = malloc(req.size);
+    s_lastRawRequest.size = s_lastRawRequest.data ? req.size : 0;
+    if (s_lastRawRequest.data) memcpy(s_lastRawRequest.data, req.data, req.size);
 
     size_t sent = 0;
     int wret = tls_write_all(&conn.ssl, req.data, req.size, &sent);
@@ -690,8 +706,17 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
 // that's normally exactly the one that just failed. Kept at the
 // http_request() level (not inside do_single_request(), which has many
 // internal return points) so one call site covers every outcome.
-static void write_debug_log(const char *url, const HttpHeader *headers, int header_count,
-                             const u8 *body, u32 body_size, Result rc, const HttpResponse *out) {
+//
+// Dumps s_lastRawRequest verbatim (the actual bytes written to the wire,
+// captured in do_single_request()) rather than reconstructing an
+// approximation from http_request()'s parameters -- the reconstruction
+// couldn't show headers added internally (Host, User-Agent, ...), which
+// is exactly what's needed when a server claims a request is malformed.
+// No redaction: an Authorization header would appear here in the clear,
+// same as it already sits in plaintext in dropbox_token.txt on the same
+// SD card, so this doesn't add a new exposure -- just keep in mind this
+// file contains the same secrets before handing the SD card to anyone.
+static void write_debug_log(const char *url, Result rc, const HttpResponse *out) {
     FILE *f = fopen("sdmc:/3ds/Konnect3DS/http_debug.log", "wb");
     if (!f) return;
 
@@ -702,18 +727,12 @@ static void write_debug_log(const char *url, const HttpHeader *headers, int head
             http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
     fprintf(f, "Result: 0x%08lX\n\n", (unsigned long)rc);
 
-    fprintf(f, "--- Request (headers/body as given to http_request(), not exact wire bytes) ---\n");
-    for (int i = 0; i < header_count; i++) {
-        if (header_name_is(headers[i].name, "Authorization")) {
-            fprintf(f, "%s: [redacted]\n", headers[i].name);
-        } else {
-            fprintf(f, "%s: %s\n", headers[i].name, headers[i].value);
-        }
-    }
-    if (body && body_size > 0) {
-        fprintf(f, "\n--- Request body (%lu bytes) ---\n", (unsigned long)body_size);
-        fwrite(body, 1, body_size, f);
+    if (s_lastRawRequest.data) {
+        fprintf(f, "--- Request, exact wire bytes (%lu) ---\n", (unsigned long)s_lastRawRequest.size);
+        fwrite(s_lastRawRequest.data, 1, s_lastRawRequest.size, f);
         fprintf(f, "\n");
+    } else {
+        fprintf(f, "--- Request was never built (failed before/during connect) ---\n");
     }
 
     if (R_SUCCEEDED(rc) && out && out->body.data) {
@@ -744,10 +763,10 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
             snprintf(currentUrl, sizeof(currentUrl), "%s", location);
             continue;
         }
-        write_debug_log(currentUrl, headers, header_count, body, body_size, rc, out);
+        write_debug_log(currentUrl, rc, out);
         return rc;
     }
-    write_debug_log(currentUrl, headers, header_count, body, body_size, HTTP_ERR_TOO_MANY_REDIRECTS, out);
+    write_debug_log(currentUrl, HTTP_ERR_TOO_MANY_REDIRECTS, out);
     return HTTP_ERR_TOO_MANY_REDIRECTS;
 }
 
