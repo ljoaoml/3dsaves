@@ -62,14 +62,23 @@ typedef enum {
 // for this login attempt (`state`). See that project's README for why
 // this exists: the 3DS can't receive an OAuth redirect itself since the
 // browser completing the login runs on a different device (the phone).
+// diag is filled with a short human-readable reason whenever the result
+// is RELAY_UNAVAILABLE, so the caller can show *why* instead of just
+// "still waiting" -- this is what actually pinned down the missing-root-CA
+// bug that a plain "can't reach relay" message couldn't distinguish from
+// a real network hiccup.
 static RelayPollResult poll_relay(const char *state, char *codeOut, size_t codeOutSize,
-                                   char *errorOut, size_t errorOutSize) {
+                                   char *errorOut, size_t errorOutSize,
+                                   char *diag, size_t diagSize) {
     char url[512];
     snprintf(url, sizeof(url), "%s/poll?state=%s", RELAY_BASE_URL, state);
 
     HttpResponse resp;
     Result rc = http_request(HTTPC_METHOD_GET, url, NULL, 0, NULL, 0, &resp);
-    if (R_FAILED(rc)) return RELAY_UNAVAILABLE;
+    if (R_FAILED(rc)) {
+        if (diag) snprintf(diag, diagSize, "rc=0x%08lX", (unsigned long)rc);
+        return RELAY_UNAVAILABLE;
+    }
 
     RelayPollResult result = RELAY_UNAVAILABLE;
     if (resp.status_code == 200 && resp.body.data) {
@@ -83,8 +92,14 @@ static RelayPollResult poll_relay(const char *state, char *codeOut, size_t codeO
             } else if (strcmp(status, "error") == 0) {
                 json_get_string(json, "error", errorOut, errorOutSize);
                 result = RELAY_ERROR;
+            } else if (diag) {
+                snprintf(diag, diagSize, "unexpected status field");
             }
+        } else if (diag) {
+            snprintf(diag, diagSize, "bad JSON, HTTP %lu", (unsigned long)resp.status_code);
         }
+    } else if (diag) {
+        snprintf(diag, diagSize, "HTTP %lu", (unsigned long)resp.status_code);
     }
     http_response_free(&resp);
     return result;
@@ -225,7 +240,9 @@ bool auth_run_login_flow(DropboxTokens *out) {
 
         if (useRelay && frame > 0 && frame % 120 == 0) { // ~every 2s at 60fps
             char relayError[128] = {0};
-            RelayPollResult pr = poll_relay(state, code, sizeof(code), relayError, sizeof(relayError));
+            char diag[64] = {0};
+            RelayPollResult pr = poll_relay(state, code, sizeof(code), relayError, sizeof(relayError),
+                                             diag, sizeof(diag));
             if (pr == RELAY_READY) {
                 haveCode = true;
             } else if (pr == RELAY_ERROR) {
@@ -240,7 +257,9 @@ bool auth_run_login_flow(DropboxTokens *out) {
                 // Report this once (not every poll) so a broken relay
                 // connection is visible instead of just waiting forever
                 // indistinguishably from "still pending".
-                ui_print_bottom("(can't reach relay right now, still trying...)\n");
+                char msg[96];
+                snprintf(msg, sizeof(msg), "(can't reach relay: %s)\n", diag[0] ? diag : "unknown");
+                ui_print_bottom(msg);
             } else if (pr == RELAY_PENDING && lastReported == RELAY_UNAVAILABLE) {
                 ui_print_bottom("(reached the relay again)\n");
             }
