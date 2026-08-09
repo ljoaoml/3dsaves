@@ -33,6 +33,13 @@ static void put_pixel(u8 *fb, int x, int y, u8 r, u8 g, u8 b) {
 }
 
 static void draw_qr_frame(const uint8_t *qr, int size, int scale, int originX, int originY) {
+    // Force a known pixel format instead of trusting whatever the current
+    // devkitPro/libctru version happens to default to -- the module count
+    // diagnostic below confirmed the QR data itself is fine, so the bug is
+    // in this drawing step; the framebuffer dimensions/format assumptions
+    // below are unverified guesses, not confirmed facts, so print them
+    // instead of asserting they're right.
+    gfxSetScreenFormat(GFX_TOP, GFX_BGR8);
     u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
     memset(fb, 0xFF, SCREEN_W * SCREEN_H * 3); // white background = quiet zone
 
@@ -85,6 +92,14 @@ int qr_display_and_wait(const char *text) {
     // Sanity print on the bottom screen: if this is ever obviously wrong
     // (not roughly 20-80), the corruption is happening before drawing.
     ui_printf_bottom("(QR: %d modules)\n", size);
+
+    // What does THIS build's libctru actually report for the top screen's
+    // raw framebuffer dimensions? Everything so far assumed 240x400
+    // (rotated) -- if that's wrong on this devkitPro version, this line
+    // will show it directly instead of us guessing again.
+    u16 fbWidth = 0, fbHeight = 0;
+    gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fbWidth, &fbHeight);
+    ui_printf_bottom("(fb reports %dx%d)\n", fbWidth, fbHeight);
 
     if (size < 1 || size > 177) { // 177 = qrcodegen's absolute max (version 40)
         free(qr);
