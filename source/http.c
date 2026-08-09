@@ -628,9 +628,13 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     Result rc = tls_connect(pu.host, pu.port, &conn);
     if (R_FAILED(rc)) return rc;
 
-    // Build the request headers + body into one buffer.
+    // Build the request headers + body into one buffer. Sized to
+    // comfortably fit the longest header line this app ever sends --
+    // "Authorization: Bearer <access_token>" with access_token up to
+    // 2048 bytes (see DropboxTokens.access_token's comment in auth.h) --
+    // with real margin, not just past the last observed failure.
     HttpBuffer req = {0};
-    char line[1600];
+    char line[2560];
     int n;
 
     n = snprintf(line, sizeof(line), "%s %s HTTP/1.1\r\n", method_to_string(method), pu.path);

@@ -86,7 +86,9 @@ static bool check_pasted_code_file(char *codeOut, size_t codeOutSize) {
 // Shared by auth_load_tokens() (the real token file) and
 // check_pasted_tokens_file() (PASTE_TOKENS_FILE, same format).
 static bool parse_token_file(FILE *f, DropboxTokens *tokens) {
-    char line[600];
+    // Must comfortably fit "access_token=" + the token itself (see
+    // DropboxTokens.access_token's comment in auth.h) + the line ending.
+    char line[2200];
     bool haveAccess = false, haveRefresh = false;
     while (fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
@@ -142,11 +144,16 @@ void auth_delete_tokens(void) {
 }
 
 static bool parse_token_response(const char *json, DropboxTokens *tokens, bool keepExistingRefresh) {
-    char access[512] = {0};
-    if (!json_get_string(json, "access_token", access, sizeof(access))) return false;
-    strncpy(tokens->access_token, access, sizeof(tokens->access_token) - 1);
+    // Extract straight into tokens->access_token/refresh_token (sized in
+    // auth.h) rather than through an intermediate fixed-size local buffer
+    // -- that extra hop is exactly what silently truncated a real
+    // access_token to 511 bytes before, since the local buffer was
+    // smaller than what Dropbox actually sends.
+    if (!json_get_string(json, "access_token", tokens->access_token, sizeof(tokens->access_token))) {
+        return false;
+    }
 
-    char refresh[256] = {0};
+    char refresh[512] = {0};
     if (json_get_string(json, "refresh_token", refresh, sizeof(refresh))) {
         strncpy(tokens->refresh_token, refresh, sizeof(tokens->refresh_token) - 1);
     } else if (!keepExistingRefresh) {
@@ -338,7 +345,7 @@ bool auth_ensure_valid(DropboxTokens *tokens, bool force_refresh) {
         if (tokens->expires_at_unix > now) return true; // still fresh
     }
 
-    char body[512];
+    char body[sizeof(tokens->refresh_token) + 96]; // fixed param names/client_id + the token itself
     int bodyLen = snprintf(body, sizeof(body),
                             "grant_type=refresh_token&refresh_token=%s&client_id=%s",
                             tokens->refresh_token, DROPBOX_CLIENT_ID);

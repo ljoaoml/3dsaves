@@ -44,7 +44,7 @@ bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
     bool retried = false;
 
     for (;;) {
-        char authHeader[600];
+        char authHeader[sizeof(tokens->access_token) + 16]; // "Bearer " + token
         snprintf(authHeader, sizeof(authHeader), "Bearer %s", tokens->access_token);
         HttpHeader headers[] = {
             {"Authorization", authHeader},

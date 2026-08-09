@@ -36,8 +36,14 @@
 #define DROPBOX_TOKEN_FILE "sdmc:/3ds/Konnect3DS/dropbox_token.txt"
 
 typedef struct {
-    char access_token[512];
-    char refresh_token[256];
+    // Dropbox's short-lived ("sl.u...") access tokens run well past 511
+    // bytes -- confirmed on real hardware: a real-world token got cut
+    // off at exactly 511 characters (the old buffer's usable limit) and
+    // was then rejected by Dropbox as invalid, twice in a row, since it
+    // was truncated before ever reaching the wire. Sized with real
+    // headroom, not just "one bump past the last failure".
+    char access_token[2048];
+    char refresh_token[512];
     u64 expires_at_unix; // 0 if unknown
     bool valid;
 } DropboxTokens;
