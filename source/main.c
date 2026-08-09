@@ -3,8 +3,10 @@
 #include "auth.h"
 #include "dropbox.h"
 #include "saves.h"
+#include "sd_browse.h"
 
 #include <3ds.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +14,16 @@
 #include <time.h>
 
 #define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
+
+// Where Checkpoint (github.com/BernardoGiordano/Checkpoint) puts its own
+// save backups -- confirmed against Checkpoint's own source
+// (3ds/source/paths.cpp): each game gets a folder here named
+// "0x%05X <game name>" (the hex title unique ID, then a space, then the
+// sanitized game description). Used as the folder picker's starting
+// point when it exists, so picking up an existing Checkpoint backup is
+// just "open the picker, pick the game, confirm" instead of hunting
+// across the whole SD card.
+#define CHECKPOINT_SAVES_DIR "sdmc:/3ds/Checkpoint/saves"
 
 typedef struct {
     InstalledTitle *titles;
@@ -27,9 +39,10 @@ static const char *menu_label(int index, void *userdata) {
         return state->loggedIn ? "Log out of Dropbox" : "Log in to Dropbox";
     }
     if (index == 1) return "Refresh title list";
-    if (index == 2) return "Exit";
+    if (index == 2) return "Import save from folder...";
+    if (index == 3) return "Exit";
 
-    int titleIndex = index - 3;
+    int titleIndex = index - 4;
     InstalledTitle *t = &state->titles[titleIndex];
     const char *mediaLabel = t->mediaType == MEDIATYPE_SD ? "SD" : "Cart";
     if (t->name[0]) {
@@ -70,10 +83,9 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     ui_print("Save extracted. Uploading to Dropbox...\n");
     ui_flush();
 
-    char dropboxPath[128];
-    snprintf(dropboxPath, sizeof(dropboxPath), "/Konnect3DS/%s_%016llX.zip",
-              t->productCode[0] ? t->productCode : "UNKNOWN",
-              (unsigned long long)t->titleId);
+    char dropboxPath[192];
+    dropbox_build_game_path(t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown"),
+                             dropboxPath, sizeof(dropboxPath));
 
     char error[256];
     bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
@@ -82,6 +94,76 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
 
     if (ok) {
         char msg[160];
+        snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
+        ui_print_success(msg);
+    } else {
+        char msg[288];
+        snprintf(msg, sizeof(msg), "\nUpload failed: %s\n", error);
+        ui_print_error(msg);
+    }
+    ui_wait_for_a();
+}
+
+// Strips Checkpoint's "0x%05X " title-unique-id prefix (see
+// CHECKPOINT_SAVES_DIR's comment above) off a folder's basename, if
+// present, so a Checkpoint-sourced folder gets a clean game name on
+// Dropbox instead of carrying the hex ID along. Any other folder name
+// (from manually browsing elsewhere) is used exactly as picked.
+static const char *display_name_for_folder(const char *folderPath) {
+    const char *base = strrchr(folderPath, '/');
+    base = base ? base + 1 : folderPath;
+
+    if (strncmp(base, "0x", 2) == 0) {
+        const char *p = base + 2;
+        int hexDigits = 0;
+        while (isxdigit((unsigned char)*p)) { p++; hexDigits++; }
+        if (hexDigits == 5 && *p == ' ' && p[1] != '\0') {
+            return p + 1;
+        }
+    }
+    return base;
+}
+
+static void import_and_upload(DropboxTokens *tokens) {
+    char startDir[64];
+    struct stat st;
+    if (stat(CHECKPOINT_SAVES_DIR, &st) == 0 && S_ISDIR(st.st_mode)) {
+        snprintf(startDir, sizeof(startDir), "%s", CHECKPOINT_SAVES_DIR);
+    } else {
+        snprintf(startDir, sizeof(startDir), "sdmc:/");
+    }
+
+    char pickedPath[512];
+    if (!sd_browse_pick_folder(startDir, pickedPath, sizeof(pickedPath))) {
+        return; // cancelled
+    }
+
+    const char *gameName = display_name_for_folder(pickedPath);
+
+    ui_clear();
+    ui_printf("Zipping %s...\n", gameName);
+    ui_flush();
+
+    Result rc = saves_backup_folder(pickedPath, TMP_ZIP_PATH);
+    if (R_FAILED(rc)) {
+        ui_print_error("\nCould not read that folder.\n");
+        ui_wait_for_a();
+        return;
+    }
+
+    ui_print("Uploading to Dropbox...\n");
+    ui_flush();
+
+    char dropboxPath[192];
+    dropbox_build_game_path(gameName, dropboxPath, sizeof(dropboxPath));
+
+    char error[256];
+    bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+
+    remove(TMP_ZIP_PATH);
+
+    if (ok) {
+        char msg[224];
         snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
         ui_print_success(msg);
     } else {
@@ -183,7 +265,7 @@ int main(void) {
     ui_flush();
 
     while (aptMainLoop()) {
-        int total = 3 + (int)state.titleCount;
+        int total = 4 + (int)state.titleCount;
         int choice = ui_run_menu("Konnect3DS", total, menu_label, &state);
 
         if (choice < 0) break; // B on the top-level menu = quit
@@ -213,9 +295,18 @@ int main(void) {
             ui_printf("Found %lu titles.\n", (unsigned long)state.titleCount);
             ui_flush();
         } else if (choice == 2) {
+            if (!state.loggedIn) {
+                ui_clear();
+                ui_print("Log in to Dropbox first.\n");
+                ui_flush();
+                ui_wait_for_a();
+                continue;
+            }
+            import_and_upload(&tokens);
+        } else if (choice == 3) {
             break;
         } else {
-            int titleIndex = choice - 3;
+            int titleIndex = choice - 4;
             if (!state.loggedIn) {
                 ui_clear();
                 ui_print("Log in to Dropbox first.\n");

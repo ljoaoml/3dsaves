@@ -4,9 +4,11 @@
 
 #include <3ds.h>
 #include <3ds/util/utf.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 // Regular retail/eShop applications live under the 0x00040000 high title-ID
 // category; system apps/modules/applets use other categories. Filtering on
@@ -169,5 +171,75 @@ Result saves_backup_title(const InstalledTitle *title, const char *zipPath) {
 
     zipw_close(zw);
     FSUSER_CloseArchive(archive);
+    return 0;
+}
+
+// Recursively walks `diskDir` (a plain sdmc:/... path) adding every file
+// found to `zw` with a zip entry name of `zipPrefix` + the file's path.
+// Mirrors walk_and_zip() above but over stdio instead of an FS_Archive,
+// since a Checkpoint-style backup already sits on the SD card as loose
+// files, not inside a title's own save archive.
+static void walk_and_zip_folder(const char *diskDir, const char *zipPrefix,
+                                 ZipWriter *zw, int depth) {
+    if (depth > 32) return; // pathological loop guard
+
+    DIR *dir = opendir(diskDir);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+
+        char childDiskPath[512];
+        snprintf(childDiskPath, sizeof(childDiskPath), "%s/%s", diskDir, entry->d_name);
+        char childZipName[512];
+        snprintf(childZipName, sizeof(childZipName), "%s%s", zipPrefix, entry->d_name);
+
+        struct stat st;
+        if (stat(childDiskPath, &st) != 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            char childZipPrefix[512];
+            snprintf(childZipPrefix, sizeof(childZipPrefix), "%s/", childZipName);
+            walk_and_zip_folder(childDiskPath, childZipPrefix, zw, depth + 1);
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) continue;
+
+        FILE *f = fopen(childDiskPath, "rb");
+        if (!f) continue;
+
+        u32 size = st.st_size > 0 ? (u32)st.st_size : 0;
+        u8 *buf = size > 0 ? malloc(size) : NULL;
+        if (size > 0 && !buf) {
+            fclose(f);
+            continue; // out of memory; skip this file rather than aborting the whole backup
+        }
+
+        u32 bytesRead = size > 0 ? (u32)fread(buf, 1, size, f) : 0;
+        fclose(f);
+        if (bytesRead != size) {
+            if (buf) free(buf);
+            continue; // short read; skip rather than zip a truncated/garbage file
+        }
+
+        zipw_add_file(zw, childZipName, buf, size);
+        if (buf) free(buf);
+    }
+
+    closedir(dir);
+}
+
+Result saves_backup_folder(const char *sourceDir, const char *zipPath) {
+    DIR *probe = opendir(sourceDir);
+    if (!probe) return -1;
+    closedir(probe);
+
+    ZipWriter *zw = zipw_open(zipPath);
+    if (!zw) return -1;
+
+    walk_and_zip_folder(sourceDir, "", zw, 0);
+
+    zipw_close(zw);
     return 0;
 }

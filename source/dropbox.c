@@ -9,6 +9,34 @@
 
 #define DROPBOX_UPLOAD_URL "https://content.dropboxapi.com/2/files/upload"
 
+// Dropbox rejects '/','\','<','>',':','"','|','?','*' and other control
+// characters in a path component (it also syncs to Windows clients, which
+// is where most of that list comes from), and a trailing space or period.
+// Game titles routinely contain some of these (e.g. "The Legend of
+// Zelda: Ocarina of Time 3D"), so this can't just be inlined into a path
+// the way the old product-code-only naming could.
+static void dropbox_sanitize_name(const char *name, char *out, size_t outSize) {
+    if (outSize == 0) return;
+    size_t o = 0;
+    for (const char *p = name; *p && o + 1 < outSize; p++) {
+        unsigned char c = (unsigned char)*p;
+        bool forbidden = c < 0x20 || c == 0x7F ||
+            c == '/' || c == '\\' || c == '<' || c == '>' || c == ':' ||
+            c == '"' || c == '|' || c == '?' || c == '*';
+        out[o++] = forbidden ? '_' : (char)c;
+    }
+    out[o] = '\0';
+
+    while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '.')) out[--o] = '\0';
+    if (out[0] == '\0') snprintf(out, outSize, "Unknown");
+}
+
+void dropbox_build_game_path(const char *name, char *out, size_t outSize) {
+    char safe[128];
+    dropbox_sanitize_name(name, safe, sizeof(safe));
+    snprintf(out, outSize, "/Konnect3DS/%s/%s.zip", safe, safe);
+}
+
 bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
                           const char *dropboxPath, char *errorOut, size_t errorOutSize) {
     if (errorOut && errorOutSize > 0) errorOut[0] = '\0';
@@ -32,8 +60,11 @@ bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
         return false;
     }
 
-    // Dropbox-API-Arg is a JSON object describing the upload; dropboxPath is
-    // built from a product code (ASCII, no quotes) so it's safe to inline.
+    // Dropbox-API-Arg is a JSON object describing the upload; dropboxPath
+    // is either built by dropbox_build_game_path() above (which already
+    // strips '"' and other JSON/path-breaking characters via
+    // dropbox_sanitize_name()) or passed in directly by a caller that
+    // controls it entirely, so it's safe to inline here.
     char apiArg[512];
     snprintf(apiArg, sizeof(apiArg),
              "{\"path\":\"%s\",\"mode\":\"overwrite\",\"autorename\":false,\"mute\":true}",
