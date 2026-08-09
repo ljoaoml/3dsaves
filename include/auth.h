@@ -12,7 +12,7 @@
 // Set your own app's client id (the "App key" from the Dropbox App
 // Console, https://www.dropbox.com/developers/apps) below before building.
 #ifndef DROPBOX_CLIENT_ID
-#define DROPBOX_CLIENT_ID "PUT_YOUR_DROPBOX_APP_KEY_HERE"
+#define DROPBOX_CLIENT_ID "xxd9vkjyoedihll"
 #endif
 
 #define DROPBOX_TOKEN_FILE "sdmc:/3dsaves/dropbox_token.txt"
