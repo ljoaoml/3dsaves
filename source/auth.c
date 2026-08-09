@@ -17,6 +17,14 @@
 #define DROPBOX_AUTHORIZE_URL "https://www.dropbox.com/oauth2/authorize"
 #define DROPBOX_TOKEN_URL "https://api.dropboxapi.com/oauth2/token"
 
+// Lets the authorization code be delivered to the 3DS without typing it
+// on the stylus keyboard (Dropbox codes are long): copy it (easy on a
+// phone) into a plain text file with this name in the Konnect3DS folder
+// on the SD card (e.g. via FTP homebrew), and it's picked up
+// automatically. Deleted after reading so a stale one doesn't get
+// reused by a later login attempt.
+#define PASTE_CODE_FILE "sdmc:/3ds/Konnect3DS/paste_code.txt"
+
 static bool random_bytes(void *out, size_t size) {
     Result rc = psInit();
     if (R_FAILED(rc)) return false;
@@ -105,6 +113,31 @@ static RelayPollResult poll_relay(const char *state, char *codeOut, size_t codeO
     return result;
 }
 
+// See PASTE_CODE_FILE's comment. Trims surrounding whitespace/newlines
+// (a phone's share/export step often adds a trailing newline).
+static bool check_pasted_code_file(char *codeOut, size_t codeOutSize) {
+    FILE *f = fopen(PASTE_CODE_FILE, "rb");
+    if (!f) return false;
+    char buf[256] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    remove(PASTE_CODE_FILE);
+    buf[n] = '\0';
+
+    size_t start = 0;
+    while (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n') start++;
+    size_t end = strlen(buf);
+    while (end > start && (buf[end - 1] == ' ' || buf[end - 1] == '\t' ||
+                            buf[end - 1] == '\r' || buf[end - 1] == '\n')) end--;
+    if (end <= start) return false;
+
+    size_t len = end - start;
+    if (len >= codeOutSize) len = codeOutSize - 1;
+    memcpy(codeOut, buf + start, len);
+    codeOut[len] = '\0';
+    return true;
+}
+
 bool auth_load_tokens(DropboxTokens *tokens) {
     memset(tokens, 0, sizeof(*tokens));
     FILE *f = fopen(DROPBOX_TOKEN_FILE, "rb");
@@ -172,11 +205,17 @@ bool auth_run_login_flow(DropboxTokens *out) {
     char verifier[128], challenge[128];
     make_pkce_pair(verifier, challenge);
 
-    // If a relay (cloudflare-relay/) is configured, use a real redirect_uri
-    // so the login can complete without the user typing anything on the
-    // 3DS -- see include/auth.h and cloudflare-relay/README.md. Otherwise
-    // fall back to the original no-redirect-URI flow (manual code entry).
-    bool useRelay = strcmp(RELAY_BASE_URL, "PUT_YOUR_RELAY_URL_HERE") != 0;
+    // The Cloudflare relay's /poll requests get a raw 400 straight from
+    // Cloudflare's edge on every domain tried (workers.dev, a dedicated
+    // custom domain with Bot Fight Mode off), confirmed via
+    // http_debug_N.log to be a complete, correctly-formed request each
+    // time -- something about this client's TLS/HTTP fingerprint that
+    // Cloudflare specifically doesn't like, unrelated to Dropbox (whose
+    // own servers accept the exact same client fine) or to this app's
+    // request formatting. Forced off until the relay is hosted
+    // somewhere without that problem; PASTE_CODE_FILE below is the
+    // no-network alternative to typing the code on the stylus keyboard.
+    bool useRelay = false;
     char state[64] = {0};
 
     char url[1024];
@@ -218,16 +257,12 @@ bool auth_run_login_flow(DropboxTokens *out) {
     ui_print_bottom("1. Scan the QR code on the TOP screen\n");
     ui_print_bottom("   with your phone's camera.\n");
     ui_print_bottom("2. Log in and click Allow.\n");
-    if (useRelay) {
-        ui_print_bottom("3. That's it -- this continues on its\n");
-        ui_print_bottom("   own once you approve.\n");
-        ui_print_bottom("   (A = type a code in manually instead,\n");
-        ui_print_bottom("   e.g. if it shows on the confirmation\n");
-        ui_print_bottom("   page but doesn't continue on its own)\n\n");
-    } else {
-        ui_print_bottom("3. Copy the code Dropbox shows you.\n");
-        ui_print_bottom("4. Press A here to type it in.\n\n");
-    }
+    ui_print_bottom("3. Copy the code Dropbox shows you.\n");
+    ui_print_bottom("4a. Save it as plain text to\n");
+    ui_print_bottom("    3ds/Konnect3DS/paste_code.txt\n");
+    ui_print_bottom("    on the SD card (e.g. via FTP) --\n");
+    ui_print_bottom("    picked up automatically, or\n");
+    ui_print_bottom("4b. Press A here to type it in.\n\n");
     ui_print_bottom("(B to cancel)\n\n");
     ui_print_bottom("Can't scan? Full URL:\n");
     ui_print_bottom(url);
@@ -250,6 +285,13 @@ bool auth_run_login_flow(DropboxTokens *out) {
         u32 kDown = hidKeysDown();
         if (kDown & KEY_B) { cancelled = true; break; }
         if (kDown & KEY_A) { wantManualEntry = true; break; }
+
+        if (frame > 0 && frame % 30 == 0) { // ~every 0.5s at 60fps
+            if (check_pasted_code_file(code, sizeof(code))) {
+                haveCode = true;
+                break;
+            }
+        }
 
         if (useRelay && frame > 0 && frame % 120 == 0) { // ~every 2s at 60fps
             char relayError[128] = {0};
