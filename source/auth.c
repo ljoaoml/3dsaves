@@ -257,15 +257,22 @@ bool auth_run_login_flow(DropboxTokens *out) {
             } else if (pr == RELAY_UNAVAILABLE && lastReported != RELAY_UNAVAILABLE) {
                 // Report this once (not every poll) so a broken relay
                 // connection is visible instead of just waiting forever
-                // indistinguishably from "still pending". Also show the
-                // cert diagnostics (http.h) so a TLS failure is fully
-                // legible: were all bundled certs even loaded from romfs,
-                // and did httpc accept them as trusted roots.
-                char msg[160];
-                snprintf(msg, sizeof(msg), "(can't reach relay: %s | certs %d/%d loaded, %d trusted)\n",
+                // indistinguishably from "still pending". Printed
+                // straight to the bottom screen, in the same moment as
+                // the test, rather than only to the SD card debug log --
+                // matching a log file to the test that produced it (SD
+                // card timing, stale files, multiple consoles/cards)
+                // turned out to be its own source of confusion.
+                char msg[280];
+                snprintf(msg, sizeof(msg),
+                         "(can't reach relay: %s | certs %d/%d loaded, %d trusted "
+                         "| ip=%s tls=%s %s | verify=%s | sent=%d recv=%d)\n",
                          diag[0] ? diag : "unknown",
                          http_get_loaded_cert_count(), http_get_total_cert_count(),
-                         http_get_last_trusted_count());
+                         http_get_last_trusted_count(),
+                         http_get_last_resolved_ip(), http_get_last_tls_version(),
+                         http_get_last_tls_cipher(), http_get_last_verify_info(),
+                         http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
                 ui_print_bottom(msg);
             } else if (pr == RELAY_PENDING && lastReported == RELAY_UNAVAILABLE) {
                 ui_print_bottom("(reached the relay again)\n");

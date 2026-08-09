@@ -113,6 +113,8 @@ static void selftest_https(const char *label, const char *url) {
         snprintf(msg, sizeof(msg), "  ip=%s tls=%s %s\n", http_get_last_resolved_ip(),
                  http_get_last_tls_version(), http_get_last_tls_cipher());
         ui_print(msg);
+        snprintf(msg, sizeof(msg), "  verify=%s\n", http_get_last_verify_info());
+        ui_print(msg);
         snprintf(msg, sizeof(msg), "  sent %d bytes, got %d bytes back\n",
                  http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
         ui_print(msg);
