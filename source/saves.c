@@ -35,8 +35,11 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         if (!is_application_title(ids[i])) continue;
 
         if (*count == *capacity) {
-            *capacity = (*capacity == 0) ? 16 : (*capacity * 2);
-            *arr = realloc(*arr, sizeof(InstalledTitle) * (*capacity));
+            u32 newCapacity = (*capacity == 0) ? 16 : (*capacity * 2);
+            InstalledTitle *grown = realloc(*arr, sizeof(InstalledTitle) * newCapacity);
+            if (!grown) break; // out of memory; keep what's been found so far
+            *arr = grown;
+            *capacity = newCapacity;
         }
 
         InstalledTitle *t = &(*arr)[*count];
