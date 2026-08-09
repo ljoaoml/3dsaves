@@ -539,7 +539,27 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
         rc = buffer_append(&req, (const u8 *)line, (u32)n);
     }
     if (R_SUCCEEDED(rc)) rc = buffer_append(&req, (const u8 *)"Connection: close\r\n", 20);
-    if (R_SUCCEEDED(rc)) rc = buffer_append(&req, (const u8 *)"User-Agent: Konnect3DS\r\n", 25);
+    // A browser-like User-Agent + Accept/Accept-Language, not our own app
+    // name: real-hardware testing showed a complete, well-formed request
+    // reaching Dropbox's API over TLS (same cipher suite as a plain
+    // `openssl s_client` from a PC on the same network) and then getting
+    // zero response bytes back, every time -- consistent with bot/WAF
+    // filtering keying off a non-browser-looking request rather than
+    // anything wrong with the TLS layer itself.
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line),
+                     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line), "Accept: */*\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
+    if (R_SUCCEEDED(rc)) {
+        n = snprintf(line, sizeof(line), "Accept-Language: en-US,en;q=0.9\r\n");
+        rc = buffer_append(&req, (const u8 *)line, (u32)n);
+    }
     if (R_SUCCEEDED(rc) && body && body_size > 0) {
         n = snprintf(line, sizeof(line), "Content-Length: %lu\r\n", (unsigned long)body_size);
         rc = buffer_append(&req, (const u8 *)line, (u32)n);
