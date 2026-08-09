@@ -10,9 +10,10 @@
 
 // Bundled root CA certs (DER), loaded from romfs at startup. These cover
 // Dropbox's current/recently-rotated TLS chains plus the other major
-// public CAs (Google Trust Services for the Cloudflare relay's
-// *.workers.dev, Sectigo/USERTrust, Amazon) rather than depending on the
-// console's aging built-in cert list. See romfs/certs/README.md.
+// public CAs -- including SSL.com (confirmed via crt.sh to be who
+// actually issues *.workers.dev's cert today, as "Cloudflare TLS Issuing
+// ECC CA 4") -- rather than depending on the console's aging built-in
+// cert list. See romfs/certs/README.md.
 static const char *const s_certFiles[] = {
     "romfs:/certs/isrg_root_x1.der",
     "romfs:/certs/digicert_global_root_g2.der",
@@ -23,6 +24,10 @@ static const char *const s_certFiles[] = {
     "romfs:/certs/gts_root_r4.der",
     "romfs:/certs/usertrust_rsa.der",
     "romfs:/certs/amazon_root_ca_1.der",
+    "romfs:/certs/sslcom_root_rsa.der",
+    "romfs:/certs/sslcom_root_ecc.der",
+    "romfs:/certs/sslcom_tls_rsa_root_2022.der",
+    "romfs:/certs/sslcom_tls_ecc_root_2022.der",
 };
 #define NUM_CERT_FILES (sizeof(s_certFiles) / sizeof(s_certFiles[0]))
 

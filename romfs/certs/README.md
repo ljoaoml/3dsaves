@@ -10,11 +10,18 @@ them as trusted roots on every HTTPS request via `httpcAddTrustedRootCA`.
 
 The Google Trust Services / USERTrust / Amazon roots were added after the
 original Dropbox-only set turned out not to be enough once a second
-domain (the relay) entered the picture -- HTTPS to it was failing
-silently (the 3DS just never got a response) because none of the
-originally bundled roots covered whatever CA issues `*.workers.dev`
-certs. Lesson: prefer bundling broad CA coverage over narrowly matching
-just the one domain you tested against.
+domain (the relay) entered the picture -- HTTPS to it was failing with
+a decodable error (`0xD8A0A03C` = module HTTP, "invalid state", TLS
+certificate verification failed) because none of the originally bundled
+roots covered whatever CA issues `*.workers.dev` certs. That first round
+of additions still wasn't the actual answer, though: checking
+[crt.sh](https://crt.sh) for the specific `*.workers.dev` cert in use
+showed the real issuer is **SSL.com** ("Cloudflare TLS Issuing ECC CA
+4"), not Google -- so the SSL.com roots below are what actually fixed
+it. Lesson: bundling broad CA coverage beats narrowly matching just the
+one domain you tested against, but when in doubt, check crt.sh for the
+*actual* current issuer instead of guessing from general knowledge of
+who a company "usually" uses -- that knowledge goes stale.
 
 Extracted from curl's [Mozilla CA bundle](https://curl.se/docs/caextract.html)
 (`cacert.pem`) on 2026-08-08 and converted to DER with:
@@ -34,6 +41,10 @@ openssl x509 -in <cert>.pem -inform PEM -out <cert>.der -outform DER
 | `gts_root_r4.der` | GTS Root R4 (Google Trust Services) |
 | `usertrust_rsa.der` | USERTrust RSA Certification Authority (Sectigo/Comodo) |
 | `amazon_root_ca_1.der` | Amazon Root CA 1 |
+| `sslcom_root_rsa.der` | SSL.com Root Certification Authority RSA |
+| `sslcom_root_ecc.der` | SSL.com Root Certification Authority ECC |
+| `sslcom_tls_rsa_root_2022.der` | SSL.com TLS RSA Root CA 2022 |
+| `sslcom_tls_ecc_root_2022.der` | SSL.com TLS ECC Root CA 2022 |
 
 Dropbox has announced ([dropbox.tech, "API server root certificate changes
 coming in 2026"](https://dropbox.tech/developers/api-server-certificate-changes))
