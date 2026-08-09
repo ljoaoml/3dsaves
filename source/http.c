@@ -294,6 +294,13 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
     {
         u64 start = osGetTime();
         while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
+            // mbedtls_net_recv_timeout (wired up as f_recv_timeout below)
+            // makes a stalled read surface as MBEDTLS_ERR_SSL_TIMEOUT
+            // directly from mbedtls_ssl_handshake() itself -- this is the
+            // common case, and it bypasses the WANT_READ/WANT_WRITE retry
+            // path entirely, so it has to be caught here too, not just via
+            // deadline_passed() below.
+            if (ret == MBEDTLS_ERR_SSL_TIMEOUT) { ret = TLS_ERR_HANDSHAKE_TIMEOUT; goto fail; }
             if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto fail;
             if (deadline_passed(start, HTTP_IO_TIMEOUT_MS)) { ret = TLS_ERR_HANDSHAKE_TIMEOUT; goto fail; }
         }
@@ -340,6 +347,10 @@ static int tls_read_some(mbedtls_ssl_context *ssl, u8 *buf, size_t len) {
     u64 start = osGetTime();
     do {
         ret = mbedtls_ssl_read(ssl, buf, len);
+        // See the matching comment in tls_connect(): a stalled read
+        // surfaces as MBEDTLS_ERR_SSL_TIMEOUT directly, not as a
+        // WANT_READ/WANT_WRITE loop we'd catch below.
+        if (ret == MBEDTLS_ERR_SSL_TIMEOUT) return TLS_ERR_READ_TIMEOUT;
         if ((ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) &&
             deadline_passed(start, HTTP_IO_TIMEOUT_MS)) {
             return TLS_ERR_READ_TIMEOUT;

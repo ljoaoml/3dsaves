@@ -91,6 +91,31 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     ui_wait_for_a();
 }
 
+// Temporary diagnostic: confirm on real hardware that the mbedTLS-over-
+// sockets rewrite of http.c (replacing the 3DS system httpc/TLS stack,
+// which cannot handshake with any modern server -- see
+// romfs/certs/README.md) actually completes a TLS connection, and shows
+// something on screen while it's blocked doing so instead of looking
+// frozen. Called against two different targets from main() below: see
+// the comment there for why. Remove once confirmed working.
+static void selftest_https(const char *label, const char *url) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "Testing connection to %s...\n", label);
+    ui_print(msg);
+    ui_flush();
+
+    HttpResponse testResp;
+    Result testRc = http_request(HTTPC_METHOD_GET, url, NULL, 0, NULL, 0, &testResp);
+    if (R_FAILED(testRc)) {
+        snprintf(msg, sizeof(msg), "[selftest] %s: FAIL rc=0x%08lX\n", label, (unsigned long)testRc);
+        ui_print_error(msg);
+    } else {
+        snprintf(msg, sizeof(msg), "[selftest] %s: OK HTTP %lu\n", label, (unsigned long)testResp.status_code);
+        ui_print_success(msg);
+        http_response_free(&testResp);
+    }
+}
+
 int main(void) {
     ui_init();
     romfsInit();
@@ -107,35 +132,16 @@ int main(void) {
     ui_clear();
     ui_print_header("Konnect3DS - back up game saves to Dropbox");
 
-    // Temporary diagnostic: a plain HTTPS GET, to confirm on real hardware
-    // that the mbedTLS-over-sockets rewrite of http.c (replacing the
-    // 3DS system httpc/TLS stack, which cannot handshake with any modern
-    // server -- see romfs/certs/README.md) actually completes a TLS
-    // connection. Targets api.dropboxapi.com, not www.dropbox.com: that's
-    // the domain the app actually talks to (token exchange/refresh); the
-    // www.dropbox.com login page only ever opens in the phone's browser,
-    // this app never fetches it, so testing against it was checking the
-    // wrong thing (and dropbox.com's front end may have anti-bot TLS
-    // fingerprinting that api.dropboxapi.com doesn't). Remove once
-    // confirmed working.
-    {
-        ui_print("Testing connection to Dropbox...\n");
-        ui_flush(); // otherwise nothing shows on screen while this blocks
-
-        HttpResponse testResp;
-        Result testRc = http_request(HTTPC_METHOD_GET, "https://api.dropboxapi.com/",
-                                      NULL, 0, NULL, 0, &testResp);
-        if (R_FAILED(testRc)) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "[selftest] api.dropboxapi.com: FAIL rc=0x%08lX\n", (unsigned long)testRc);
-            ui_print_error(msg);
-        } else {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "[selftest] api.dropboxapi.com: OK HTTP %lu\n", (unsigned long)testResp.status_code);
-            ui_print_success(msg);
-            http_response_free(&testResp);
-        }
-    }
+    // api.dropboxapi.com is the domain the app actually talks to (token
+    // exchange/refresh) -- www.dropbox.com only ever opens in the phone's
+    // browser via the QR code, this app never fetches it. example.com is
+    // an unrelated, bot-protection-free control: the relay
+    // (*.workers.dev) has been completing requests fine on this same
+    // build, so if Dropbox's own servers time out while example.com
+    // doesn't, that points at something specific to Dropbox's TLS
+    // termination rather than a general bug in this app's TLS client.
+    selftest_https("api.dropboxapi.com", "https://api.dropboxapi.com/");
+    selftest_https("example.com (control)", "https://example.com/");
 
     ui_print("Select a title on the bottom screen, or\n");
     ui_print("log in to Dropbox first if you haven't yet.\n");
