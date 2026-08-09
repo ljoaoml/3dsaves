@@ -39,7 +39,7 @@ static void draw_qr_frame(const uint8_t *qr, int size, int scale, int originX, i
     // in this drawing step; the framebuffer dimensions/format assumptions
     // below are unverified guesses, not confirmed facts, so print them
     // instead of asserting they're right.
-    gfxSetScreenFormat(GFX_TOP, GFX_BGR8);
+    gfxSetScreenFormat(GFX_TOP, GSP_BGR8_OES);
     u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
     memset(fb, 0xFF, SCREEN_W * SCREEN_H * 3); // white background = quiet zone
 
