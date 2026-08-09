@@ -203,6 +203,18 @@ bool auth_run_login_flow(DropboxTokens *out) {
     ui_clear();
     ui_clear_bottom();
     ui_print_header_bottom("Link Dropbox account");
+#ifndef KONNECT3DS_GIT_HASH
+#define KONNECT3DS_GIT_HASH "unknown"
+#endif
+    // The top screen's build-hash line (main.c) gets overwritten by the
+    // QR code the moment this screen shows, so it and any diagnostic
+    // printed later on THIS screen would never appear in the same photo
+    // -- repeat it here so a single screenshot always has both.
+    {
+        char buildMsg[32];
+        snprintf(buildMsg, sizeof(buildMsg), "build %s\n", KONNECT3DS_GIT_HASH);
+        ui_print_bottom(buildMsg);
+    }
     ui_print_bottom("1. Scan the QR code on the TOP screen\n");
     ui_print_bottom("   with your phone's camera.\n");
     ui_print_bottom("2. Log in and click Allow.\n");
