@@ -319,24 +319,6 @@ static void resolve_and_log_ip(const char *host) {
     }
 }
 
-// The 3DS's time() has been observed returning the console's *local*
-// wall-clock components read as if they were already UTC, unadjusted
-// for the configured region's UTC offset (e.g. ~3h behind true UTC for
-// a Brazil/UTC-3 console) -- confirmed on real hardware: a certificate
-// issued minutes earlier showed as "not yet valid" even with the
-// console's displayed date/time correct. That skew is bounded and
-// systematic (not a sign of a genuinely wrong/malicious clock), so
-// rather than weakening MBEDTLS_SSL_VERIFY_REQUIRED overall, only the
-// two date-related flags get cleared here; chain-of-trust, hostname and
-// signature checks are untouched and still fail normally.
-static int cert_verify_callback(void *data, mbedtls_x509_crt *crt, int depth, uint32_t *flags) {
-    (void)data;
-    (void)crt;
-    (void)depth;
-    *flags &= ~(uint32_t)(MBEDTLS_X509_BADCERT_FUTURE | MBEDTLS_X509_BADCERT_EXPIRED);
-    return 0;
-}
-
 static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_net_init(&c->net);
     mbedtls_ssl_init(&c->ssl);
@@ -355,9 +337,19 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
                                        MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) goto fail;
 
-    mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    // VERIFY_OPTIONAL, not VERIFY_REQUIRED: lets the handshake complete
+    // unconditionally, and the actual accept/reject decision happens
+    // explicitly below via mbedtls_ssl_get_verify_result() instead of
+    // being made internally by mbedTLS. A verify callback
+    // (mbedtls_ssl_conf_verify) that cleared the date-related bad-cert
+    // flags was tried here first and should have worked per mbedTLS's
+    // own docs, but real-hardware testing kept showing the connection
+    // still rejected for exactly the flags the callback was supposed to
+    // clear -- this direct, do-it-ourselves approach removes any
+    // dependency on that internal callback/decision interaction working
+    // the way the docs describe.
+    mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_ca_chain(&c->conf, &s_caChain, NULL);
-    mbedtls_ssl_conf_verify(&c->conf, cert_verify_callback, NULL);
     mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &s_ctrDrbg);
     mbedtls_ssl_conf_read_timeout(&c->conf, HTTP_IO_TIMEOUT_MS);
 
@@ -410,22 +402,36 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
         snprintf(s_lastTlsCipher, sizeof(s_lastTlsCipher), "%s", cipher ? cipher : "?");
     }
 
+    // The handshake completing (VERIFY_OPTIONAL) doesn't mean the
+    // certificate was actually accepted -- check for ourselves here.
+    // The 3DS's time() has been observed returning the console's
+    // *local* wall-clock components read as if they were already UTC,
+    // unadjusted for the configured region's UTC offset (e.g. ~3h
+    // behind true UTC for a Brazil/UTC-3 console) -- confirmed on real
+    // hardware: a certificate issued minutes earlier showed as "not yet
+    // valid" even with the console's displayed date/time correct. That
+    // skew is bounded and systematic, not a sign of a genuinely wrong
+    // clock, so those two flags are masked out before deciding;
+    // anything else (untrusted CA, hostname mismatch, bad signature,
+    // ...) still rejects the connection exactly as VERIFY_REQUIRED
+    // would have.
+    {
+        uint32_t vrfy = mbedtls_ssl_get_verify_result(&c->ssl);
+        vrfy &= ~(uint32_t)(MBEDTLS_X509_BADCERT_FUTURE | MBEDTLS_X509_BADCERT_EXPIRED);
+        if (vrfy != 0) {
+            mbedtls_x509_crt_verify_info(s_lastVerifyInfo, sizeof(s_lastVerifyInfo), "", vrfy);
+            size_t len = strlen(s_lastVerifyInfo);
+            if (len > 0 && s_lastVerifyInfo[len - 1] == '\n') s_lastVerifyInfo[len - 1] = '\0';
+            ret = MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+            goto fail;
+        }
+    }
+
     return 0;
 
 fail:
     {
         Result rc = mbedtls_to_result(ret);
-        if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
-            // Only meaningful once a cert was actually received and
-            // checked -- calling this for any other failure reason
-            // risks reading uninitialized/absent verify state.
-            uint32_t vrfy = mbedtls_ssl_get_verify_result(&c->ssl);
-            if (vrfy != 0 && vrfy != 0xFFFFFFFF) {
-                mbedtls_x509_crt_verify_info(s_lastVerifyInfo, sizeof(s_lastVerifyInfo), "", vrfy);
-                size_t len = strlen(s_lastVerifyInfo);
-                if (len > 0 && s_lastVerifyInfo[len - 1] == '\n') s_lastVerifyInfo[len - 1] = '\0';
-            }
-        }
         mbedtls_ssl_free(&c->ssl);
         mbedtls_ssl_config_free(&c->conf);
         mbedtls_net_free(&c->net);
