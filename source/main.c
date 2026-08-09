@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
 
@@ -142,6 +143,22 @@ int main(void) {
 #define KONNECT3DS_GIT_HASH "unknown"
 #endif
     ui_printf("build %s\n", KONNECT3DS_GIT_HASH);
+    {
+        // TLS certificate validation checks the cert's NotBefore/NotAfter
+        // against libc's time(), not the console's System Settings clock
+        // display directly -- printing what time() actually returns
+        // rules that mismatch in or out instead of trusting the two are
+        // the same thing.
+        time_t now = time(NULL);
+        struct tm *tmNow = localtime(&now);
+        char timeBuf[48];
+        if (tmNow) {
+            strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", tmNow);
+        } else {
+            snprintf(timeBuf, sizeof(timeBuf), "(localtime failed)");
+        }
+        ui_printf("system time: %s (raw=%lld)\n", timeBuf, (long long)now);
+    }
     ui_flush();
 
     // api.dropboxapi.com is the domain the app actually talks to (token
