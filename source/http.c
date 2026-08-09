@@ -123,6 +123,13 @@ static uint32_t s_lastVerifyFlagsAfterMask = 0xFFFFFFFF;
 // thing worth ruling in or out when a server claims a request is
 // malformed.
 static HttpBuffer s_lastRawRequest = {0};
+// The response's status line + headers (the body is already captured
+// separately in HttpResponse.body) -- a malformed/rejected request often
+// says exactly why in a response header (or its absence, e.g. Dropbox
+// serving its website's HTML error template instead of the API's normal
+// JSON error body has a very different Content-Type/Server than a real
+// API response), which was previously discarded right after parsing.
+static HttpBuffer s_lastResponseHeaders = {0};
 
 int http_get_loaded_cert_count(void) { return s_certFileCount; }
 int http_get_total_cert_count(void) { return (int)NUM_CERT_FILES; }
@@ -610,6 +617,9 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     free(s_lastRawRequest.data);
     s_lastRawRequest.data = NULL;
     s_lastRawRequest.size = 0;
+    free(s_lastResponseHeaders.data);
+    s_lastResponseHeaders.data = NULL;
+    s_lastResponseHeaders.size = 0;
 
     ParsedUrl pu;
     if (!parse_url(url, &pu) || !pu.https) return HTTP_ERR_BAD_URL;
@@ -633,7 +643,7 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
         }
         rc = buffer_append(&req, (const u8 *)line, (u32)n);
     }
-    if (R_SUCCEEDED(rc)) rc = buffer_append(&req, (const u8 *)"Connection: close\r\n", 20);
+    if (R_SUCCEEDED(rc)) rc = buffer_append(&req, (const u8 *)"Connection: close\r\n", sizeof("Connection: close\r\n") - 1);
     // Used to send a full set of browser-impersonating headers here
     // (Chrome User-Agent, Accept/Accept-Language, Fetch Metadata,
     // Upgrade-Insecure-Requests) trying to work around Cloudflare's edge
@@ -716,6 +726,10 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     if (!headerBlock) { free(raw.data); return HTTP_ERR_OOM; }
     memcpy(headerBlock, raw.data, headerLen);
     headerBlock[headerLen] = '\0';
+
+    s_lastResponseHeaders.data = malloc(headerLen);
+    s_lastResponseHeaders.size = s_lastResponseHeaders.data ? (u32)headerLen : 0;
+    if (s_lastResponseHeaders.data) memcpy(s_lastResponseHeaders.data, raw.data, headerLen);
 
     unsigned int status = 0;
     sscanf(headerBlock, "HTTP/%*d.%*d %u", &status);
@@ -804,6 +818,27 @@ static int next_log_number(void) {
     return n;
 }
 
+// A stray control byte (NUL, or anything else below 0x20 other than the
+// \r\n line endings themselves) inside the header block turns an
+// otherwise well-formed-looking request into something a strict server
+// will flat-out reject -- exactly what happened when "Connection: close\r\n"
+// was written with a hardcoded length one byte too long and copied the
+// C string literal's trailing NUL onto the wire. Scanning for that here
+// means a regression like it shows up directly in the log's own header
+// section instead of needing another byte-by-byte hex dump to spot.
+// Only scans up to the first \r\n\r\n (the header section) -- the body is
+// free to contain any bytes, it's usually binary (a zip).
+static long find_bad_header_byte(const HttpBuffer *req) {
+    if (!req->data) return -1;
+    const u8 *sep = find_bytes(req->data, req->size, "\r\n\r\n");
+    size_t headerLen = sep ? (size_t)(sep - req->data) : req->size;
+    for (size_t i = 0; i < headerLen; i++) {
+        u8 c = req->data[i];
+        if (c < 0x20 && c != '\r' && c != '\n') return (long)i;
+    }
+    return -1;
+}
+
 // Kept at the http_request() level (not inside do_single_request(),
 // which has many internal return points) so one call site covers every
 // outcome.
@@ -847,7 +882,15 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
             (unsigned long)http_get_last_verify_flags_after_mask());
     fprintf(f, "Bytes sent: %d, bytes received: %d\n",
             http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
-    fprintf(f, "Result: 0x%08lX\n\n", (unsigned long)rc);
+    fprintf(f, "Result: 0x%08lX\n", (unsigned long)rc);
+    long badByte = find_bad_header_byte(&s_lastRawRequest);
+    if (badByte >= 0) {
+        fprintf(f, "WARNING: request headers contain a raw control byte "
+                   "(0x%02X) at offset %ld -- this alone is enough for a "
+                   "strict server to reject the request with 400.\n",
+                (unsigned)s_lastRawRequest.data[badByte], badByte);
+    }
+    fprintf(f, "\n");
 
     if (s_lastRawRequest.data) {
         fprintf(f, "--- Request, exact wire bytes (%lu) ---\n", (unsigned long)s_lastRawRequest.size);
@@ -855,6 +898,13 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
         fprintf(f, "\n");
     } else {
         fprintf(f, "--- Request was never built (failed before/during connect) ---\n");
+    }
+
+    if (s_lastResponseHeaders.data) {
+        fprintf(f, "\n--- Response, status line + headers (%lu bytes) ---\n",
+                (unsigned long)s_lastResponseHeaders.size);
+        fwrite(s_lastResponseHeaders.data, 1, s_lastResponseHeaders.size, f);
+        fprintf(f, "\n");
     }
 
     if (R_SUCCEEDED(rc) && out && out->body.data) {
