@@ -7,15 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
 #include <netinet/in.h>
-#include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
@@ -81,7 +75,6 @@ static const char *const s_certFiles[] = {
 #define TLS_ERR_HANDSHAKE_TIMEOUT (-0x7001)
 #define TLS_ERR_WRITE_TIMEOUT     (-0x7002)
 #define TLS_ERR_READ_TIMEOUT      (-0x7003)
-#define TLS_ERR_CONNECT_TIMEOUT   (-0x7004)
 
 static Result mbedtls_to_result(int mbedErr) {
     u32 code = (u32)((mbedErr < 0) ? -mbedErr : mbedErr) & 0xFFFF;
@@ -314,71 +307,22 @@ static bool deadline_passed(u64 startMs, u32 timeoutMs) {
     return (osGetTime() - startMs) > timeoutMs;
 }
 
-// DNS resolution + mbedtls_net_connect()'s blocking connect() had no
-// timeout at all -- unlike every phase after it (handshake/write/read,
-// all bounded by HTTP_IO_TIMEOUT_MS), a slow/flaky network could hang
-// here for minutes. Confirmed on real hardware: a self-test that
-// normally completes in well under a second took ~3 minutes and then
-// failed. This does its own getaddrinfo() + non-blocking connect() +
-// select()-with-timeout instead of calling mbedtls_net_connect()
-// directly, then hands the resulting fd to mbedtls's net context (a
-// plain `{int fd;}` struct in this mbedTLS version, safe to set
-// directly). select()-based bounding of a socket op is the same
-// primitive mbedtls_net_recv_timeout already uses for reads elsewhere
-// in this file, which real-hardware testing has confirmed works here.
+// Reverted: a hand-rolled non-blocking connect() + select() here (to
+// bound the connect phase, which mbedtls_net_connect() itself doesn't
+// time-limit) broke every connection outright on real hardware -- most
+// likely this platform's socket layer doesn't report a pending
+// non-blocking connect via the POSIX-standard EINPROGRESS this code
+// assumed (some BSD-socket-alike stacks use EWOULDBLOCK or something
+// else instead), so a perfectly good in-progress connect was
+// misdiagnosed as a hard failure on the very first check. Back to
+// mbedtls_net_connect() (blocking, unbounded, but the one thing in this
+// file proven to actually work) until there's a way to test a fix
+// against real hardware instead of guessing again.
 static Result bounded_tcp_connect(const char *host, int port, mbedtls_net_context *net) {
     char portStr[8];
     snprintf(portStr, sizeof(portStr), "%d", port);
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET; // 3DS soc:u is IPv4-only
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, portStr, &hints, &res) != 0 || !res) {
-        return mbedtls_to_result(MBEDTLS_ERR_NET_UNKNOWN_HOST);
-    }
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        return mbedtls_to_result(MBEDTLS_ERR_NET_SOCKET_FAILED);
-    }
-
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-
-    int cret = connect(fd, res->ai_addr, res->ai_addrlen);
-    Result rc = 0;
-    if (cret != 0 && errno != EINPROGRESS) {
-        rc = mbedtls_to_result(MBEDTLS_ERR_NET_CONNECT_FAILED);
-    } else if (cret != 0) {
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(fd, &wfds);
-        struct timeval tv;
-        tv.tv_sec = HTTP_IO_TIMEOUT_MS / 1000;
-        tv.tv_usec = (HTTP_IO_TIMEOUT_MS % 1000) * 1000;
-        int sret = select(fd + 1, NULL, &wfds, NULL, &tv);
-        if (sret <= 0) {
-            rc = mbedtls_to_result(TLS_ERR_CONNECT_TIMEOUT);
-        } else {
-            int soErr = 0;
-            socklen_t soErrLen = sizeof(soErr);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &soErrLen) != 0 || soErr != 0) {
-                rc = mbedtls_to_result(MBEDTLS_ERR_NET_CONNECT_FAILED);
-            }
-        }
-    }
-
-    freeaddrinfo(res);
-
-    if (R_FAILED(rc)) {
-        close(fd);
-        return rc;
-    }
-
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
-    net->fd = fd;
+    int ret = mbedtls_net_connect(net, host, portStr, MBEDTLS_NET_PROTO_TCP);
+    if (ret != 0) return mbedtls_to_result(ret);
     return 0;
 }
 
