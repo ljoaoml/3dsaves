@@ -1,0 +1,168 @@
+BasicInfo:
+  Title                   : $(APP_TITLE)
+  ProductCode             : $(APP_PRODUCT_CODE)
+  Logo                    : Homebrew # Nintendo / Licensed / Distributed / iQue / iQueForSystem / Homebrew
+
+RomFs:
+  # Bundles romfs/certs/*.der (the TLS root CAs http.c loads at startup)
+  # into the CIA's RomFS partition, same content the .3dsx build embeds
+  # via 3dsxtool's --romfs flag.
+  RootPath                : $(APP_ROMFS)
+
+TitleInfo:
+  Category                : Application
+  UniqueId                : $(APP_UNIQUE_ID)
+
+Option:
+  UseOnSD                 : true # true if App is to be installed to SD
+  FreeProductCode         : true # Removes limitations on ProductCode
+  MediaFootPadding        : false # If true CCI files are created with padding
+  EnableCrypt             : $(APP_ENCRYPTED) # Enables encryption for NCCH and CIA
+  EnableCompress          : true # Compresses where applicable (currently only exefs:/.code)
+
+AccessControlInfo:
+  CoreVersion                   : 2
+  DescVersion                   : 2
+  ReleaseKernelMajor            : "02"
+  ReleaseKernelMinor            : "33"
+
+  # ExtData: not used -- this app only reads OTHER titles' SAVEDATA
+  # archives (via ARCHIVE_USER_SAVEDATA), it doesn't keep its own.
+  UseExtSaveData                : false
+
+  # FS:USER Archive Access Permissions.
+  # CategorySystemApplication is what actually lets a 3rd-party CIA open
+  # another installed title's SAVEDATA archive (see source/saves.c);
+  # DirectSdmc/CategoryFileSystemTool cover general SD read/write for the
+  # zip + token file this app writes under sdmc:/3dsaves/. NOTE: this is
+  # the one part of the CIA permission setup that couldn't be verified
+  # without real hardware -- if save backup fails with a permission error
+  # on a real console, this list (and whether the console's CFW patches
+  # signature/ACL checks at all) is the first place to look.
+  FileSystemAccess:
+   - CategorySystemApplication
+   - CategoryFileSystemTool
+   - DirectSdmc
+
+  # Process Settings
+  MemoryType                    : Application # Application/System/Base
+  SystemMode                    : $(APP_SYSTEM_MODE) # 64MB(Default)/96MB/80MB/72MB/32MB
+  IdealProcessor                : 0
+  AffinityMask                  : 1
+  Priority                      : 16
+  MaxCpu                        : 0x9E # Default
+  HandleTableSize               : 0x200
+  DisableDebug                  : false
+  EnableForceDebug              : false
+  CanWriteSharedPage            : true
+  CanUsePrivilegedPriority      : false
+  CanUseNonAlphabetAndNumber    : true
+  PermitMainFunctionArgument    : true
+  CanShareDeviceMemory          : true
+  RunnableOnSleep               : false
+  SpecialMemoryArrange          : true
+
+  # New3DS Exclusive Process Settings
+  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy(Default)/124MB/178MB
+  CpuSpeed                      : 804MHz # 256MHz(Default)/804MHz
+  EnableL2Cache                 : true
+  CanAccessCore2                : true
+
+  IORegisterMapping:
+   - 1ff00000-1ff7ffff   # DSP memory
+  MemoryMapping:
+   - 1f000000-1f5fffff:r # VRAM
+
+  # Accessible SVCs, <Name>:<ID> -- standard baseline set every homebrew
+  # app needs (memory/thread/mutex/event primitives etc), unrelated to
+  # which *services* (below) the app actually talks to.
+  SystemCallAccess:
+    ArbitrateAddress: 34
+    Backdoor: 123
+    Break: 60
+    CancelTimer: 28
+    ClearEvent: 25
+    ClearTimer: 29
+    CloseHandle: 35
+    ConnectToPort: 45
+    ControlMemory: 1
+    ControlProcessMemory: 112
+    CreateAddressArbiter: 33
+    CreateEvent: 23
+    CreateMemoryBlock: 30
+    CreateMutex: 19
+    CreateSemaphore: 21
+    CreateThread: 8
+    CreateTimer: 26
+    DuplicateHandle: 39
+    ExitProcess: 3
+    ExitThread: 9
+    GetCurrentProcessorNumber: 17
+    GetHandleInfo: 41
+    GetProcessId: 53
+    GetProcessIdOfThread: 54
+    GetProcessIdealProcessor: 6
+    GetProcessInfo: 43
+    GetResourceLimit: 56
+    GetResourceLimitCurrentValues: 58
+    GetResourceLimitLimitValues: 57
+    GetSystemInfo: 42
+    GetSystemTick: 40
+    GetThreadContext: 59
+    GetThreadId: 55
+    GetThreadIdealProcessor: 15
+    GetThreadInfo: 44
+    GetThreadPriority: 11
+    MapMemoryBlock: 31
+    OutputDebugString: 61
+    QueryMemory: 2
+    ReleaseMutex: 20
+    ReleaseSemaphore: 22
+    SendSyncRequest1: 46
+    SendSyncRequest2: 47
+    SendSyncRequest3: 48
+    SendSyncRequest4: 49
+    SendSyncRequest: 50
+    SetThreadPriority: 12
+    SetTimer: 27
+    SignalEvent: 24
+    SleepThread: 10
+    UnmapMemoryBlock: 32
+    WaitSynchronization1: 36
+    WaitSynchronizationN: 37
+
+  # Service List -- trimmed to exactly what this app calls (see each
+  # libctru *Init() call in source/): am (title listing), fs (saves +
+  # SD I/O), gsp/hid/APT (graphics/input/applet, needed by every app),
+  # http (Dropbox networking), ps (PKCE random bytes), cfg (used
+  # internally by several libctru applet/service calls), ndm (network
+  # arbitration alongside http:C). No soc:U / ssl:C: httpc talks TLS
+  # itself over its own http:C handle, we never open sockets or an ssl:
+  # service connection directly (verified against libctru's httpc.c).
+  ServiceAccessControl:
+   - APT:U
+   - am:u
+   - cfg:u
+   - fs:USER
+   - gsp::Gpu
+   - hid:USER
+   - http:C
+   - ndm:u
+   - ps:ps
+
+
+SystemControlInfo:
+  SaveDataSize: 0KB # This app has no SAVEDATA of its own
+  RemasterVersion: 2
+  StackSize: 0x40000
+
+  # Modules backing the services listed above (title IDs are libctru's
+  # well-known system module IDs, same for every 3DS unit/region).
+  Dependency:
+    am: 0x0004013000001502
+    cfg: 0x0004013000001702
+    gsp: 0x0004013000001c02
+    hid: 0x0004013000001d02
+    http: 0x0004013000002902
+    ndm: 0x0004013000002b02
+    ps: 0x0004013000003102

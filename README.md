@@ -2,18 +2,29 @@
 
 A Nintendo 3DS homebrew app that backs up a game's save data to Dropbox.
 
-Runs as a `.3dsx` via the Homebrew Launcher (no CFW-specific access
-required — the same permission level used by tools like
+Builds as either a `.3dsx` (run via Homebrew Launcher, no extra tools) or
+a `.cia` (install with FBI, get a HOME menu icon like a real app). Reading
+another title's save archive needs the same elevated FS access tools like
 [JKSM](https://github.com/J-D-K/JKSM) / [Checkpoint](https://github.com/BernardoGiordano/Checkpoint)
-is enough to read another title's save archive).
+rely on — see the CIA permission note under "Known rough edges" below.
 
 ## Status
 
-This is a from-scratch scaffold: the code is written to the documented
-libctru/Dropbox APIs but has **not been compiled or run on hardware or in
-an emulator** in this session (no devkitARM toolchain / 3DS available
-here). Treat it as a strong starting point that needs a build-and-test
-pass, not as verified-working code. See "Known rough edges" below.
+Compiles clean (`.3dsx`) as of the latest fixes below. The `.cia` build
+path was written against real working templates (Checkpoint's RSF, the
+classic `3ds-template` Makefile) but hasn't actually been run through
+`make cia` yet — see "Known rough edges" for the one part of it
+(the FS permission list) that most needs on-hardware verification.
+
+Fixes applied while getting the first build green (kept here so it's
+obvious what changed since the initial scaffold, not because the code
+still needs work):
+- `ARCH` flags updated for current devkitARM/GCC (`-mtype=thumb
+  -mthumb-interwork` were removed upstream; now `-mtp=soft`).
+- Missing `#include <stdio.h>` / `<stddef.h>` in `include/http.h` /
+  `include/dropbox.h` (used `FILE`/`size_t` without including them).
+- `_3DSXDEPS` was referenced but never defined, so the `.smdh` icon never
+  actually got built before `3dsxtool` tried to embed it.
 
 ## What it does
 
@@ -49,7 +60,21 @@ make
 ```
 
 Produces `3dsaves.3dsx` (+ `.smdh`). Copy it to `/3ds/3dsaves/` on the SD
-card and launch via Homebrew Launcher.
+card and launch via Homebrew Launcher — **`.3dsx` is not something FBI
+installs**, it just runs directly from that launcher.
+
+### Building a `.cia` instead (installs with FBI)
+
+Needs two extra tools that aren't part of the base `3ds-dev` group:
+
+```sh
+(dkp-)pacman -S general-tools   # provides makerom + bannertool
+make cia
+```
+
+Produces `3dsaves.cia`. Copy it to the SD card and install it with FBI
+like any other CIA — it'll get a real HOME menu icon (a plain generated
+placeholder icon/banner for now, see `resources/`).
 
 ## One-time setup: register a Dropbox app
 
@@ -81,10 +106,17 @@ card and launch via Homebrew Launcher.
 
 ## Known rough edges / follow-ups
 
-- **Not build-tested.** The APIs used (`httpc`, `am`, `fs`, `ps`, `swkbd`)
-  were cross-checked against current libctru headers, but there's no
-  substitute for actually compiling with devkitARM and running it —
-  please treat the first build as a debugging pass, not a rubber stamp.
+- **CIA permission list is the least-verified part.** `resources/template.rsf`
+  declares `CategorySystemApplication` in `FileSystemAccess` specifically so
+  a properly-installed CIA (not run through the Homebrew Launcher exploit,
+  which already has broad FS access regardless of any RSF) can open other
+  titles' `SAVEDATA` archives. Whether this is sufficient depends partly on
+  what your CFW (e.g. Luma3DS) patches system-wide — if `.cia` save backup
+  fails with a permission error on real hardware, this list is the first
+  place to check.
+- **`.3dsx` end-to-end still needs a real backup+upload test.** It compiles
+  and should run/list titles, but a full "pick a title, upload, check
+  Dropbox" pass hasn't been confirmed on hardware yet.
 - **Auth URL has no QR code.** The Dropbox authorize URL (with the PKCE
   `code_challenge` in the query string) is long — typing it by hand on a
   phone is tedious. Rendering it as an on-screen QR code (e.g. with
@@ -114,8 +146,12 @@ card and launch via Homebrew Launcher.
 ## Project layout
 
 ```
-source/    application code (.c)
-include/   headers (.h)
-romfs/     bundled read-only assets (root CA certs)
-Makefile   devkitARM build rules
+source/     application code (.c)
+include/    headers (.h)
+romfs/      bundled read-only assets (root CA certs), embedded in both
+            the .3dsx (via 3dsxtool --romfs) and the .cia (via the RSF's
+            RomFs/RootPath)
+resources/  CIA-only: AppInfo (title/author/ids), template.rsf
+            (permissions), icon.png/banner.png/audio.wav (placeholder art)
+Makefile    devkitARM build rules (`make` -> .3dsx, `make cia` -> .cia)
 ```
