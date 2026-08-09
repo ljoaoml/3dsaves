@@ -7,9 +7,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
@@ -75,6 +81,7 @@ static const char *const s_certFiles[] = {
 #define TLS_ERR_HANDSHAKE_TIMEOUT (-0x7001)
 #define TLS_ERR_WRITE_TIMEOUT     (-0x7002)
 #define TLS_ERR_READ_TIMEOUT      (-0x7003)
+#define TLS_ERR_CONNECT_TIMEOUT   (-0x7004)
 
 static Result mbedtls_to_result(int mbedErr) {
     u32 code = (u32)((mbedErr < 0) ? -mbedErr : mbedErr) & 0xFFFF;
@@ -307,24 +314,72 @@ static bool deadline_passed(u64 startMs, u32 timeoutMs) {
     return (osGetTime() - startMs) > timeoutMs;
 }
 
-// Best-effort, for diagnostics only: does its own separate DNS lookup
-// just to have a human-readable IP to show/log (mbedtls_net_connect()
-// does its own internal lookup and doesn't hand the resolved address
-// back to the caller). If there are multiple A records this might not
-// be the exact one mbedtls_net_connect ends up using, but in the common
-// single-A-record case it is.
-static void resolve_and_log_ip(const char *host) {
-    s_lastResolvedIp[0] = '\0';
+// DNS resolution + mbedtls_net_connect()'s blocking connect() had no
+// timeout at all -- unlike every phase after it (handshake/write/read,
+// all bounded by HTTP_IO_TIMEOUT_MS), a slow/flaky network could hang
+// here for minutes. Confirmed on real hardware: a self-test that
+// normally completes in well under a second took ~3 minutes and then
+// failed. This does its own getaddrinfo() + non-blocking connect() +
+// select()-with-timeout instead of calling mbedtls_net_connect()
+// directly, then hands the resulting fd to mbedtls's net context (a
+// plain `{int fd;}` struct in this mbedTLS version, safe to set
+// directly). select()-based bounding of a socket op is the same
+// primitive mbedtls_net_recv_timeout already uses for reads elsewhere
+// in this file, which real-hardware testing has confirmed works here.
+static Result bounded_tcp_connect(const char *host, int port, mbedtls_net_context *net) {
+    char portStr[8];
+    snprintf(portStr, sizeof(portStr), "%d", port);
+
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET; // 3DS soc:u is IPv4-only
     hints.ai_socktype = SOCK_STREAM;
     struct addrinfo *res = NULL;
-    if (getaddrinfo(host, NULL, &hints, &res) == 0 && res) {
-        struct sockaddr_in *sa = (struct sockaddr_in *)(void *)res->ai_addr;
-        inet_ntop(AF_INET, &sa->sin_addr, s_lastResolvedIp, sizeof(s_lastResolvedIp));
-        freeaddrinfo(res);
+    if (getaddrinfo(host, portStr, &hints, &res) != 0 || !res) {
+        return mbedtls_to_result(MBEDTLS_ERR_NET_UNKNOWN_HOST);
     }
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        return mbedtls_to_result(MBEDTLS_ERR_NET_SOCKET_FAILED);
+    }
+
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+
+    int cret = connect(fd, res->ai_addr, res->ai_addrlen);
+    Result rc = 0;
+    if (cret != 0 && errno != EINPROGRESS) {
+        rc = mbedtls_to_result(MBEDTLS_ERR_NET_CONNECT_FAILED);
+    } else if (cret != 0) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        struct timeval tv;
+        tv.tv_sec = HTTP_IO_TIMEOUT_MS / 1000;
+        tv.tv_usec = (HTTP_IO_TIMEOUT_MS % 1000) * 1000;
+        int sret = select(fd + 1, NULL, &wfds, NULL, &tv);
+        if (sret <= 0) {
+            rc = mbedtls_to_result(TLS_ERR_CONNECT_TIMEOUT);
+        } else {
+            int soErr = 0;
+            socklen_t soErrLen = sizeof(soErr);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &soErrLen) != 0 || soErr != 0) {
+                rc = mbedtls_to_result(MBEDTLS_ERR_NET_CONNECT_FAILED);
+            }
+        }
+    }
+
+    freeaddrinfo(res);
+
+    if (R_FAILED(rc)) {
+        close(fd);
+        return rc;
+    }
+
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
+    net->fd = fd;
+    return 0;
 }
 
 static Result tls_connect(const char *host, int port, TlsConn *c) {
@@ -332,13 +387,27 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
     mbedtls_ssl_init(&c->ssl);
     mbedtls_ssl_config_init(&c->conf);
 
-    resolve_and_log_ip(host);
+    int ret = 0;
+    Result connectRc = bounded_tcp_connect(host, port, &c->net);
+    if (R_FAILED(connectRc)) {
+        mbedtls_ssl_free(&c->ssl);
+        mbedtls_ssl_config_free(&c->conf);
+        mbedtls_net_free(&c->net);
+        return connectRc;
+    }
 
-    char portStr[8];
-    snprintf(portStr, sizeof(portStr), "%d", port);
-
-    int ret = mbedtls_net_connect(&c->net, host, portStr, MBEDTLS_NET_PROTO_TCP);
-    if (ret != 0) goto fail;
+    // Now that we're connected, ask the socket itself who we're talking
+    // to instead of doing a second, separate (and separately
+    // DNS-lookup-dependent) resolution just for this diagnostic.
+    {
+        struct sockaddr_in peer;
+        socklen_t peerLen = sizeof(peer);
+        if (getpeername(c->net.fd, (struct sockaddr *)&peer, &peerLen) == 0) {
+            inet_ntop(AF_INET, &peer.sin_addr, s_lastResolvedIp, sizeof(s_lastResolvedIp));
+        } else {
+            s_lastResolvedIp[0] = '\0';
+        }
+    }
 
     ret = mbedtls_ssl_config_defaults(&c->conf, MBEDTLS_SSL_IS_CLIENT,
                                        MBEDTLS_SSL_TRANSPORT_STREAM,
