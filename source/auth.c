@@ -261,24 +261,29 @@ bool auth_run_login_flow(DropboxTokens *out) {
 
     qr_free(qr);
 
+    // qr_draw_frame() forces the top screen into GSP_BGR8_OES every frame
+    // to plot QR pixels directly and never sets it back; put it back to
+    // the console's own default format before printing through it again.
+    // And since the screen is double-buffered, a single consoleClear()
+    // only wipes whichever buffer is currently the *back* one -- the
+    // other still holds raw QR pixels until the next swap, which shows
+    // up as a half-QR/half-garbage frame. Clearing+flushing twice
+    // guarantees both buffers are wiped before anything else gets drawn.
+    gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
+    ui_clear();
+    ui_flush();
+    ui_clear();
+    ui_flush();
+
     if (cancelled) return false;
 
     if (haveTokens) {
         // The relay already did the full token exchange server-side;
         // this file *is* the finished result, nothing left to do here
         // but persist it.
-        ui_clear();
-        ui_flush();
         auth_save_tokens(out);
         return true;
     }
-
-    // Drew straight to the top screen's framebuffer, bypassing the
-    // console entirely -- clear it properly now so the console's own
-    // state (and the framebuffer) are back to normal before we print
-    // anything through it again.
-    ui_clear();
-    ui_flush();
 
     if (!haveCode) {
         if (!swkbd_get_text("Paste the Dropbox authorization code", code, sizeof(code)) ||
