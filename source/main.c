@@ -115,6 +115,10 @@ static void selftest_https(const char *label, const char *url) {
         ui_print(msg);
         snprintf(msg, sizeof(msg), "  verify=%s\n", http_get_last_verify_info());
         ui_print(msg);
+        snprintf(msg, sizeof(msg), "  verify flags: raw=0x%08lX after_mask=0x%08lX\n",
+                 (unsigned long)http_get_last_verify_flags_raw(),
+                 (unsigned long)http_get_last_verify_flags_after_mask());
+        ui_print(msg);
         snprintf(msg, sizeof(msg), "  sent %d bytes, got %d bytes back\n",
                  http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
         ui_print(msg);

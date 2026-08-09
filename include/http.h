@@ -64,6 +64,13 @@ const char *http_get_last_tls_cipher(void);
 // why (untrusted CA, expired, hostname mismatch, ...) -- "?" otherwise.
 const char *http_get_last_verify_info(void);
 
+// Raw mbedtls_ssl_get_verify_result() bitmask from the most recent
+// connection attempt, before (raw) and after (after_mask) the
+// date-related flags (BADCERT_FUTURE, BADCERT_EXPIRED) are cleared.
+// 0xFFFFFFFF means no connection attempt got far enough to check.
+u32 http_get_last_verify_flags_raw(void);
+u32 http_get_last_verify_flags_after_mask(void);
+
 // Performs a single HTTPS request, following redirects (up to 5 hops).
 // `body`/`body_size` may be NULL/0 for methods without a request body.
 // On success fills `out` (caller must call http_response_free when done).

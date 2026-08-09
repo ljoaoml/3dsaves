@@ -109,6 +109,11 @@ static char s_lastTlsCipher[64] = "";
 // it was, and that's exactly what's needed to tell "this CA isn't in
 // our bundle" apart from "this cert isn't valid yet/anymore".
 static char s_lastVerifyInfo[256] = "";
+// Raw mbedtls_ssl_get_verify_result() bitmask, before and after the
+// date-flag mask is applied -- lets the masking logic itself be checked
+// directly instead of inferred from whether the connection succeeded.
+static uint32_t s_lastVerifyFlagsRaw = 0xFFFFFFFF;
+static uint32_t s_lastVerifyFlagsAfterMask = 0xFFFFFFFF;
 // The exact bytes actually written to the wire for the most recent
 // request, captured right after it's built (whether or not sending it
 // then succeeds) -- write_debug_log() dumps this verbatim instead of
@@ -128,6 +133,8 @@ const char *http_get_last_resolved_ip(void) { return s_lastResolvedIp[0] ? s_las
 const char *http_get_last_tls_version(void) { return s_lastTlsVersion[0] ? s_lastTlsVersion : "?"; }
 const char *http_get_last_tls_cipher(void) { return s_lastTlsCipher[0] ? s_lastTlsCipher : "?"; }
 const char *http_get_last_verify_info(void) { return s_lastVerifyInfo[0] ? s_lastVerifyInfo : "?"; }
+u32 http_get_last_verify_flags_raw(void) { return (u32)s_lastVerifyFlagsRaw; }
+u32 http_get_last_verify_flags_after_mask(void) { return (u32)s_lastVerifyFlagsAfterMask; }
 
 Result http_init(void) {
     s_socBuffer = (u32 *)memalign(SOC_ALIGN, SOC_BUFFER_SIZE);
@@ -418,7 +425,9 @@ static Result tls_connect(const char *host, int port, TlsConn *c) {
     // would have.
     {
         uint32_t vrfy = mbedtls_ssl_get_verify_result(&c->ssl);
+        s_lastVerifyFlagsRaw = vrfy;
         vrfy &= ~(uint32_t)(MBEDTLS_X509_BADCERT_FUTURE | MBEDTLS_X509_BADCERT_EXPIRED);
+        s_lastVerifyFlagsAfterMask = vrfy;
         if (vrfy != 0) {
             mbedtls_x509_crt_verify_info(s_lastVerifyInfo, sizeof(s_lastVerifyInfo), "", vrfy);
             size_t len = strlen(s_lastVerifyInfo);
@@ -583,6 +592,8 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     s_lastTlsVersion[0] = '\0';
     s_lastTlsCipher[0] = '\0';
     s_lastVerifyInfo[0] = '\0';
+    s_lastVerifyFlagsRaw = 0xFFFFFFFF;
+    s_lastVerifyFlagsAfterMask = 0xFFFFFFFF;
     free(s_lastRawRequest.data);
     s_lastRawRequest.data = NULL;
     s_lastRawRequest.size = 0;
@@ -846,6 +857,9 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     fprintf(f, "Resolved IP: %s\n", http_get_last_resolved_ip());
     fprintf(f, "TLS: %s %s\n", http_get_last_tls_version(), http_get_last_tls_cipher());
     fprintf(f, "Cert verify: %s\n", http_get_last_verify_info());
+    fprintf(f, "Cert verify flags: raw=0x%08lX after_mask=0x%08lX\n",
+            (unsigned long)http_get_last_verify_flags_raw(),
+            (unsigned long)http_get_last_verify_flags_after_mask());
     fprintf(f, "Bytes sent: %d, bytes received: %d\n",
             http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
     fprintf(f, "Result: 0x%08lX\n\n", (unsigned long)rc);

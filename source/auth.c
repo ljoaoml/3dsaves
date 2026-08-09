@@ -286,6 +286,10 @@ bool auth_run_login_flow(DropboxTokens *out) {
                          http_get_last_tls_cipher(), http_get_last_verify_info(),
                          http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
                 ui_print_bottom(msg);
+                snprintf(msg, sizeof(msg), "(verify flags: raw=0x%08lX after_mask=0x%08lX)\n",
+                         (unsigned long)http_get_last_verify_flags_raw(),
+                         (unsigned long)http_get_last_verify_flags_after_mask());
+                ui_print_bottom(msg);
             } else if (pr == RELAY_PENDING && lastReported == RELAY_UNAVAILABLE) {
                 ui_print_bottom("(reached the relay again)\n");
             }
