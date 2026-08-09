@@ -29,3 +29,12 @@ bool ui_confirm(const char *prompt);
 
 // Blocks until any of KEY_A/KEY_B/KEY_START is pressed (for "press A to continue" screens).
 void ui_wait_for_a(void);
+
+// Same as ui_clear/ui_print/ui_printf but for the bottom screen, for
+// screens that need the top screen free for something else (e.g. the
+// Dropbox login QR code, drawn directly to the top screen's framebuffer).
+// Still use ui_flush() to actually present them -- it swaps both screens'
+// framebuffers together, there's no separate per-screen flush in libctru.
+void ui_clear_bottom(void);
+void ui_print_bottom(const char *text);
+void ui_printf_bottom(const char *fmt, ...);

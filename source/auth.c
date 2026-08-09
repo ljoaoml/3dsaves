@@ -5,6 +5,7 @@
 #include "minijson.h"
 #include "swkbd_util.h"
 #include "ui.h"
+#include "qr_display.h"
 
 #include <3ds.h>
 #include <stdio.h>
@@ -111,22 +112,40 @@ bool auth_run_login_flow(DropboxTokens *out) {
              DROPBOX_AUTHORIZE_URL, DROPBOX_CLIENT_ID, challenge);
 
     ui_clear();
-    ui_print("=== Link Dropbox account ===\n\n");
-    ui_print("1. On your phone or PC, open this URL:\n\n");
-    ui_print(url);
-    ui_print("\n\n2. Log in and click Allow.\n");
-    ui_print("3. Copy the code Dropbox shows you.\n");
-    ui_print("4. Press A here to type it in.\n\n");
-    ui_print("(B to cancel)\n");
+    ui_clear_bottom();
+    ui_print_bottom("=== Link Dropbox account ===\n\n");
+    ui_print_bottom("1. Scan the QR code on the TOP screen\n");
+    ui_print_bottom("   with your phone's camera.\n");
+    ui_print_bottom("2. Log in and click Allow.\n");
+    ui_print_bottom("3. Copy the code Dropbox shows you.\n");
+    ui_print_bottom("4. Press A here to type it in.\n\n");
+    ui_print_bottom("(B to cancel)\n\n");
+    ui_print_bottom("Can't scan? Full URL:\n");
+    ui_print_bottom(url);
+    ui_print_bottom("\n");
     ui_flush();
 
-    while (true) {
-        hidScanInput();
-        u32 kDown = hidKeysDown();
-        if (kDown & KEY_A) break;
-        if (kDown & KEY_B) return false;
-        gspWaitForVBlank();
+    int qrResult = qr_display_and_wait(url);
+    if (qrResult == 0) return false; // user pressed B
+    if (qrResult == -1) {
+        // QR generation failed (shouldn't happen for a normal-length URL) --
+        // fall back to the plain-text URL already shown on the bottom
+        // screen and let A/B drive the same confirm/cancel choice.
+        while (true) {
+            hidScanInput();
+            u32 kDown = hidKeysDown();
+            if (kDown & KEY_A) break;
+            if (kDown & KEY_B) return false;
+            gspWaitForVBlank();
+        }
     }
+
+    // qr_display_and_wait drew straight to the top screen's framebuffer,
+    // bypassing the console entirely -- clear it properly now so the
+    // console's own state (and the framebuffer) are back to normal before
+    // we print anything through it again.
+    ui_clear();
+    ui_flush();
 
     char code[256] = {0};
     if (!swkbd_get_text("Paste the Dropbox authorization code", code, sizeof(code)) ||

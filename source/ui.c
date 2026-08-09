@@ -101,3 +101,24 @@ void ui_wait_for_a(void) {
         gspWaitForVBlank();
     }
 }
+
+void ui_clear_bottom(void) {
+    consoleSelect(&s_bottomConsole);
+    consoleClear();
+    consoleSelect(&s_topConsole);
+}
+
+void ui_print_bottom(const char *text) {
+    consoleSelect(&s_bottomConsole);
+    fputs(text, stdout);
+    consoleSelect(&s_topConsole);
+}
+
+void ui_printf_bottom(const char *fmt, ...) {
+    consoleSelect(&s_bottomConsole);
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    consoleSelect(&s_topConsole);
+}

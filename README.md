@@ -35,10 +35,14 @@ still needs work):
    (`source/saves.c`, `source/minizip_writer.c`).
 3. Logs in to Dropbox using OAuth 2.0 Authorization Code + PKCE, with the
    *no-redirect-URI* variant Dropbox supports for apps that can't receive
-   an HTTP redirect: the authorization code is shown on the Dropbox
-   consent page for the user to copy and paste back in via the 3DS
-   software keyboard (`source/auth.c`). No client secret is embedded in
-   the binary.
+   an HTTP redirect. The authorize URL is shown as a QR code drawn
+   directly to the top screen's framebuffer (`source/qr_display.c`, using
+   a vendored copy of [nayuki/QR-Code-generator](https://github.com/nayuki/QR-Code-generator),
+   MIT-licensed) so you scan it with a phone instead of typing a ~190
+   character URL by hand; the plain-text URL still prints on the bottom
+   screen as a fallback. After approving on Dropbox, the authorization
+   code it shows is typed back in via the 3DS software keyboard
+   (`source/auth.c`). No client secret is embedded in the binary.
 4. Uploads the zip to `/3dsaves/<PRODUCT-CODE>_<TITLEID>.zip` in the
    user's Dropbox via `POST /2/files/upload` (`source/dropbox.c`).
 
@@ -95,9 +99,10 @@ placeholder icon/banner for now, see `resources/`).
 
 ## Using it
 
-- On first run, select **Log in to Dropbox**, open the printed URL on
-  another device, approve access, then press A on the 3DS and paste the
-  code Dropbox shows you.
+- On first run, select **Log in to Dropbox**, scan the QR code on the top
+  screen with your phone (or type the URL printed on the bottom screen
+  manually), approve access, then press A on the 3DS and paste the code
+  Dropbox shows you.
 - Pick a title from the list and it backs up + uploads immediately.
 - Titles are listed by product code and title ID (e.g. `CTR-P-AREE`)
   rather than a friendly game name — resolving the SMDH icon/title info
@@ -117,12 +122,14 @@ placeholder icon/banner for now, see `resources/`).
 - **`.3dsx` end-to-end still needs a real backup+upload test.** It compiles
   and should run/list titles, but a full "pick a title, upload, check
   Dropbox" pass hasn't been confirmed on hardware yet.
-- **Auth URL has no QR code.** The Dropbox authorize URL (with the PKCE
-  `code_challenge` in the query string) is long — typing it by hand on a
-  phone is tedious. Rendering it as an on-screen QR code (e.g. with
-  [nayuki/QR-Code-generator](https://github.com/nayuki/QR-Code-generator)'s
-  C port + citro2d for pixel drawing instead of the plain text console
-  used here) would fix this and is the highest-value UX improvement.
+- **QR code drawing is new, untested territory.** `source/qr_display.c`
+  writes raw pixels straight to the top screen's framebuffer (bypassing
+  the text console), using the standard-but-easy-to-get-backwards 3DS
+  formula for the screen's 90°-rotated memory layout
+  (`x*240+(239-y)`, BGR8, 3 bytes/pixel). If the code shows up scrambled,
+  mirrored, or sideways on real hardware, that formula/pixel format is the
+  first thing to check — everything else (console text) is unaffected
+  since it's drawn through the normal `PrintConsole` path, not this.
 - **`EXTDATA`-only titles aren't handled**, only `SAVEDATA`
   (`ARCHIVE_USER_SAVEDATA`). Some titles keep save data in extdata
   instead/as well; adding that archive type is a moderate amount of
@@ -146,7 +153,8 @@ placeholder icon/banner for now, see `resources/`).
 ## Project layout
 
 ```
-source/     application code (.c)
+source/     application code (.c), plus a vendored copy of nayuki's
+            qrcodegen (MIT license, embedded in the file header)
 include/    headers (.h)
 romfs/      bundled read-only assets (root CA certs), embedded in both
             the .3dsx (via 3dsxtool --romfs) and the .cia (via the RSF's
