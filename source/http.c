@@ -10,10 +10,12 @@
 
 // Bundled root CA certs (DER), loaded from romfs at startup. These cover
 // Dropbox's current/recently-rotated TLS chains plus the other major
-// public CAs -- including SSL.com (confirmed via crt.sh to be who
-// actually issues *.workers.dev's cert today, as "Cloudflare TLS Issuing
-// ECC CA 4") -- rather than depending on the console's aging built-in
-// cert list. See romfs/certs/README.md.
+// public CAs. Cloudflare's *.workers.dev turned out to rotate between
+// *two* issuers (Google Trust Services and SSL.com), and the Google side
+// chains not to a "GTS Root" but to GlobalSign (Google Trust Services'
+// "WE1" intermediate is itself signed by GlobalSign ECC Root CA - R4) --
+// confirmed by walking the actual AIA chain, not guessed. See
+// romfs/certs/README.md.
 static const char *const s_certFiles[] = {
     "romfs:/certs/isrg_root_x1.der",
     "romfs:/certs/digicert_global_root_g2.der",
@@ -28,6 +30,10 @@ static const char *const s_certFiles[] = {
     "romfs:/certs/sslcom_root_ecc.der",
     "romfs:/certs/sslcom_tls_rsa_root_2022.der",
     "romfs:/certs/sslcom_tls_ecc_root_2022.der",
+    "romfs:/certs/globalsign_ecc_root_r4.der",
+    "romfs:/certs/globalsign_ecc_root_r5.der",
+    "romfs:/certs/globalsign_root_r3.der",
+    "romfs:/certs/globalsign_root_r6.der",
 };
 #define NUM_CERT_FILES (sizeof(s_certFiles) / sizeof(s_certFiles[0]))
 
@@ -92,17 +98,18 @@ void http_url_encode(const char *src, char *dst, size_t dst_size) {
     dst[o] = '\0';
 }
 
-static Result apply_ssl_trust(httpcContext *ctx) {
-    Result rc = 0;
+static void apply_ssl_trust(httpcContext *ctx) {
     // A couple of Nintendo-firmware built-in roots that also happen to
     // cover common CDN/API fronting; harmless to add even if unused.
     httpcAddDefaultCert(ctx, SSLC_DefaultRootCert_CyberTrust);
     httpcAddDefaultCert(ctx, SSLC_DefaultRootCert_DigiCert_EV);
+    // Best-effort per cert: one bad/rejected entry (e.g. a context-level
+    // limit on trusted roots) shouldn't take the whole request down with
+    // it when the other certs might still be enough to validate the
+    // actual chain the server presents.
     for (int i = 0; i < s_certCount; i++) {
-        rc = httpcAddTrustedRootCA(ctx, s_certs[i].data, s_certs[i].size);
-        if (R_FAILED(rc)) return rc;
+        httpcAddTrustedRootCA(ctx, s_certs[i].data, s_certs[i].size);
     }
-    return 0;
 }
 
 static Result buffer_append(HttpBuffer *buf, const u8 *chunk, u32 chunk_size) {
@@ -140,8 +147,7 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     Result rc = httpcOpenContext(&ctx, method, url, 0);
     if (R_FAILED(rc)) return rc;
 
-    rc = apply_ssl_trust(&ctx);
-    if (R_FAILED(rc)) { httpcCloseContext(&ctx); return rc; }
+    apply_ssl_trust(&ctx);
 
     httpcSetKeepAlive(&ctx, HTTPC_KEEPALIVE_ENABLED);
 

@@ -8,20 +8,30 @@ correctly even though the 3DS's built-in trusted cert list
 modern CA/chain. `source/http.c` loads all of these at startup and adds
 them as trusted roots on every HTTPS request via `httpcAddTrustedRootCA`.
 
-The Google Trust Services / USERTrust / Amazon roots were added after the
-original Dropbox-only set turned out not to be enough once a second
-domain (the relay) entered the picture -- HTTPS to it was failing with
-a decodable error (`0xD8A0A03C` = module HTTP, "invalid state", TLS
-certificate verification failed) because none of the originally bundled
-roots covered whatever CA issues `*.workers.dev` certs. That first round
-of additions still wasn't the actual answer, though: checking
-[crt.sh](https://crt.sh) for the specific `*.workers.dev` cert in use
-showed the real issuer is **SSL.com** ("Cloudflare TLS Issuing ECC CA
-4"), not Google -- so the SSL.com roots below are what actually fixed
-it. Lesson: bundling broad CA coverage beats narrowly matching just the
-one domain you tested against, but when in doubt, check crt.sh for the
-*actual* current issuer instead of guessing from general knowledge of
-who a company "usually" uses -- that knowledge goes stale.
+The non-Dropbox roots were added chasing one HTTPS failure to the
+Cloudflare relay's `*.workers.dev` (see `cloudflare-relay/`), decodable
+as `0xD8A0A03C` = module HTTP, "invalid state", TLS certificate
+verification failed. It took three rounds to actually fix, which is worth
+recording so it isn't repeated:
+
+1. First guess: Google Trust Services roots. Wrong -- didn't fix it.
+2. Checked [crt.sh](https://crt.sh) for the actual cert in use: issued by
+   **SSL.com** ("Cloudflare TLS Issuing ECC CA 4"). Added SSL.com's roots.
+   Still didn't fully fix it -- Cloudflare turned out to be *rotating
+   between two different issuers* for the same hostname (confirmed via
+   [certspotter.com](https://api.certspotter.com)'s issuance history:
+   alternating Google Trust Services and SSL.com certs, days apart).
+3. Walked the Google side's actual AIA chain (fetching each issuer cert's
+   own "CA Issuers" URL with curl+openssl, not guessing): Google Trust
+   Services' `WE1` intermediate is itself signed by **GlobalSign ECC Root
+   CA - R4**, not any of the "GTS Root" certs. That was the missing piece.
+
+Lesson: bundle broad CA coverage instead of narrowly matching just the
+one domain you tested against; a domain can rotate between multiple
+issuers; and when a chain doesn't validate, walk the *actual* AIA chain
+(each cert's issuer field / "CA Issuers" URL) rather than trusting
+general knowledge of who a company "usually" uses for its root -- that
+knowledge goes stale, and intermediate providers change hands.
 
 Extracted from curl's [Mozilla CA bundle](https://curl.se/docs/caextract.html)
 (`cacert.pem`) on 2026-08-08 and converted to DER with:
@@ -45,6 +55,10 @@ openssl x509 -in <cert>.pem -inform PEM -out <cert>.der -outform DER
 | `sslcom_root_ecc.der` | SSL.com Root Certification Authority ECC |
 | `sslcom_tls_rsa_root_2022.der` | SSL.com TLS RSA Root CA 2022 |
 | `sslcom_tls_ecc_root_2022.der` | SSL.com TLS ECC Root CA 2022 |
+| `globalsign_ecc_root_r4.der` | GlobalSign ECC Root CA - R4 (the actual root behind Google Trust Services' WE1) |
+| `globalsign_ecc_root_r5.der` | GlobalSign ECC Root CA - R5 |
+| `globalsign_root_r3.der` | GlobalSign Root CA - R3 |
+| `globalsign_root_r6.der` | GlobalSign Root CA - R6 |
 
 Dropbox has announced ([dropbox.tech, "API server root certificate changes
 coming in 2026"](https://dropbox.tech/developers/api-server-certificate-changes))
