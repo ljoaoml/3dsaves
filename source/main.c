@@ -18,6 +18,7 @@
 #define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
 #define MAX_LOCAL_BACKUPS 64
 #define MAX_DROPBOX_BACKUPS_SHOWN 32
+#define MAX_CHECKPOINT_TITLE_FOLDERS 128
 #define BACKED_UP_MARKS_PATH "sdmc:/3ds/Konnect3DS/backed_up.txt"
 
 // Which titles have been backed up at least once through this app --
@@ -103,25 +104,26 @@ static const char *title_display_name(const InstalledTitle *t) {
     return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
 }
 
-// ui_run_icon_grid()'s caption callback: index 0 is always its reserved
-// folder/import tile, 1..N line up with title_icon_pixels() below (same
-// state->visible indexing, offset by 1). The physical game card slot can
-// only ever hold one title at a time and is easy to mix up with an
-// SD-installed game sharing a similar name, so it's flagged in the
-// caption -- display-only (a static scratch buffer, safe since only one
-// caption is ever read per frame): title_display_name() itself is left
-// alone since it also feeds Dropbox path building elsewhere, and a
+// ui_run_icon_grid()'s caption callback: index 0/1 are its two reserved
+// tiles, 2..N+1 line up with title_icon_pixels() below (same
+// state->visible indexing, offset by 2 instead of 1). The physical game
+// card slot can only ever hold one title at a time and is easy to mix up
+// with an SD-installed game sharing a similar name, so it's flagged in
+// the caption -- display-only (a static scratch buffer, safe since only
+// one caption is ever read per frame): title_display_name() itself is
+// left alone since it also feeds Dropbox path building elsewhere, and a
 // "(Cartridge)" suffix has no business ending up in a Dropbox folder name.
 static const char *grid_label(int index, void *userdata) {
     const MenuState *state = (const MenuState *)userdata;
     if (index == 0) return "Import from SD/3DS folder";
+    if (index == 1) return "Checkpoint";
 
-    const InstalledTitle *t = &state->titles[state->visible[index - 1]];
+    const InstalledTitle *t = &state->titles[state->visible[index - 2]];
     const char *name = title_display_name(t);
     if (t->mediaType != MEDIATYPE_GAME_CARD) return name;
 
     static char labelBuf[80];
-    snprintf(labelBuf, sizeof(labelBuf), "%s (Cartucho)", name);
+    snprintf(labelBuf, sizeof(labelBuf), "%s (Cartridge)", name);
     return labelBuf;
 }
 
@@ -188,8 +190,8 @@ static void refresh_account_email(DropboxTokens *tokens) {
 
 static const char *account_menu_label(int index, void *userdata) {
     (void)userdata;
-    if (index == 0) return ui_is_email_hidden() ? "Mostrar email no header" : "Ocultar email no header";
-    if (index == 1) return "Sair da conta (logout)";
+    if (index == 0) return ui_is_email_hidden() ? "Show email in header" : "Hide email in header";
+    if (index == 1) return "Log out";
     return "?";
 }
 
@@ -200,7 +202,7 @@ static const char *account_menu_label(int index, void *userdata) {
 // email visibility doesn't immediately kick back out to the grid.
 static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
     for (;;) {
-        int choice = ui_run_menu("Gerenciar conta", 2, account_menu_label, NULL);
+        int choice = ui_run_menu("Manage account", 2, account_menu_label, NULL);
         if (choice < 0) return; // B: back to the grid, nothing changed
 
         if (choice == 0) {
@@ -209,7 +211,7 @@ static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
         }
 
         // choice == 1: log out
-        if (ui_confirm("Sair da conta do Dropbox?")) {
+        if (ui_confirm("Log out of Dropbox?")) {
             auth_delete_tokens();
             memset(tokens, 0, sizeof(*tokens));
             state->loggedIn = false;
@@ -511,12 +513,12 @@ static void show_game_detail(MenuState *state, DropboxTokens *tokens, int titleI
 static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
     if (state->titleCount == 0) {
         ui_clear();
-        ui_print_error("\nNenhum jogo para fazer backup.\n");
+        ui_print_error("\nNo games to back up.\n");
         ui_wait_for_a();
         return;
     }
 
-    if (!ui_confirm("Fazer backup de todos os jogos para o Dropbox?")) return;
+    if (!ui_confirm("Back up every game to Dropbox?")) return;
 
     char timestamp[64];
     time_t now = time(NULL);
@@ -562,11 +564,11 @@ static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
     ui_clear();
     if (failCount == 0) {
         char msg[64];
-        snprintf(msg, sizeof(msg), "\nBackup de %d jogos concluido.\n", okCount);
+        snprintf(msg, sizeof(msg), "\nBacked up %d games.\n", okCount);
         ui_print_success(msg);
     } else {
         char msg[768];
-        snprintf(msg, sizeof(msg), "\nBackup de %d jogos concluido, %d falharam:\n%s\n",
+        snprintf(msg, sizeof(msg), "\nBacked up %d games, %d failed:\n%s\n",
                  okCount, failCount, failedNames);
         ui_print_error(msg);
     }
@@ -641,6 +643,126 @@ static void import_and_upload(DropboxTokens *tokens) {
         ui_print_error(msg);
     }
     ui_wait_for_a();
+}
+
+static const char *checkpoint_folder_menu_label(int index, void *userdata) {
+    const CheckpointTitleFolder *folders = (const CheckpointTitleFolder *)userdata;
+    return display_name_for_folder(folders[index].fullPath);
+}
+
+static const char *checkpoint_instance_menu_label(int index, void *userdata) {
+    const CheckpointBackup *instances = (const CheckpointBackup *)userdata;
+    return instances[index].name;
+}
+
+// If `folder` (a raw Checkpoint save folder discovered by
+// checkpoint_list_title_folders(), not necessarily a currently-listed
+// InstalledTitle) matches an installed title's own unique id, marks that
+// title backed up too -- so the grid badge (see refresh_visible()) picks
+// up a manual Checkpoint-folder upload the same as one made from
+// show_game_detail(). A no-op if nothing matches (uninstalled title, or
+// the folder didn't parse a unique id at all).
+static void mark_backed_up_by_unique_id(MenuState *state, u32 uniqueId) {
+    if (uniqueId == 0) return;
+    for (u32 i = 0; i < state->titleCount; i++) {
+        if ((u32)(state->titles[i].titleId >> 8) == uniqueId) {
+            mark_backed_up(state->titles[i].titleId);
+            return;
+        }
+    }
+}
+
+// The picker for one Checkpoint title folder's own backup instances --
+// same upload flow as upload_local_backup()'s non-live (Checkpoint
+// folder) branch, just sourced from a folder found by browsing rather
+// than from an installed title's own scan, so there's no InstalledTitle
+// or live-save option here.
+static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *tokens,
+                                           const CheckpointTitleFolder *folder) {
+    const char *gameName = display_name_for_folder(folder->fullPath);
+
+    static CheckpointBackup instances[MAX_LOCAL_BACKUPS];
+    int count = 0;
+    checkpoint_list_backups_in_folder(folder->fullPath, instances, MAX_LOCAL_BACKUPS, &count);
+
+    if (count == 0) {
+        ui_clear();
+        ui_print_error("\nNo backup instances found in this folder.\n");
+        ui_wait_for_a();
+        return;
+    }
+
+    for (;;) {
+        print_dropbox_backups(tokens, gameName);
+
+        int choice = ui_run_menu(gameName, count, checkpoint_instance_menu_label, instances);
+        if (choice < 0) return; // B: back to the folder list
+
+        ui_clear();
+        ui_printf("Backing up %s...\n", instances[choice].name);
+        ui_flush();
+
+        Result rc = saves_backup_folder(instances[choice].fullPath, TMP_ZIP_PATH);
+        if (R_FAILED(rc)) {
+            ui_print_error("\nCould not read that folder.\n");
+            ui_wait_for_a();
+            continue;
+        }
+
+        ui_print("Save extracted. Uploading to Dropbox...\n");
+        ui_flush();
+
+        char dropboxPath[192];
+        dropbox_build_backup_path(gameName, instances[choice].name, dropboxPath, sizeof(dropboxPath));
+
+        char error[256];
+        bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+        remove(TMP_ZIP_PATH);
+
+        if (ok) {
+            mark_backed_up_by_unique_id(state, folder->uniqueId);
+            char msg[224];
+            snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
+            ui_print_success(msg);
+        } else {
+            char msg[288];
+            snprintf(msg, sizeof(msg), "\nUpload failed: %s\n", error);
+            ui_print_error(msg);
+        }
+        ui_wait_for_a();
+    }
+}
+
+// Tile 1 on the icon grid: browses every folder Checkpoint itself has
+// ever saved to CHECKPOINT_SAVES_DIR, not just the ones belonging to a
+// title this app's own automatic filtering currently lists -- an
+// uninstalled game, or one this app's probe still doesn't recognize for
+// some reason, is still reachable here since it only reads the SD card's
+// folder structure directly (checkpoint_list_title_folders()), the same
+// way Checkpoint itself would show it.
+static void show_checkpoint_browser(MenuState *state, DropboxTokens *tokens) {
+    static CheckpointTitleFolder folders[MAX_CHECKPOINT_TITLE_FOLDERS];
+    int count = 0;
+    if (!checkpoint_list_title_folders(folders, MAX_CHECKPOINT_TITLE_FOLDERS, &count)) {
+        ui_clear();
+        ui_print_error("\nCheckpoint's saves folder wasn't found -- "
+                        "Checkpoint has never backed anything up on this SD card yet.\n");
+        ui_wait_for_a();
+        return;
+    }
+    if (count == 0) {
+        ui_clear();
+        ui_print_error("\nCheckpoint's saves folder is empty.\n");
+        ui_wait_for_a();
+        return;
+    }
+
+    for (;;) {
+        int choice = ui_run_menu("Checkpoint backups", count, checkpoint_folder_menu_label, folders);
+        if (choice < 0) return; // B: back to the home screen
+
+        show_checkpoint_folder_detail(state, tokens, &folders[choice]);
+    }
 }
 
 // Temporary diagnostic: confirm on real hardware that the mbedTLS-over-
@@ -788,8 +910,8 @@ int main(void) {
                 refresh_visible(&state);
                 ui_clear();
                 ui_print(state.extdataFilterOn
-                    ? "Mostrando so jogos com dados extras.\n"
-                    : "Mostrando todos os jogos.\n");
+                    ? "Showing only games with extra data.\n"
+                    : "Showing all games.\n");
                 ui_flush();
                 ui_wait_briefly(90);
                 continue;
@@ -801,10 +923,20 @@ int main(void) {
                 continue;
             }
 
-            // choice is an index into state.visible (1..visibleCount), not
-            // state.titles directly -- state.visible[] is what maps back to
-            // a real title when the extdata filter (SELECT) has hidden some.
-            int titleIndex = (int)state.visible[choice - 1];
+            if (choice == 1) {
+                show_checkpoint_browser(&state, &tokens);
+                // Doesn't change which titles are installed, so a full
+                // refresh_titles() (an AM re-scan) isn't needed -- just
+                // rebuild the badge marks in case something was uploaded.
+                refresh_visible(&state);
+                continue;
+            }
+
+            // choice is an index into state.visible (2..visibleCount+1),
+            // not state.titles directly -- state.visible[] is what maps
+            // back to a real title when the extdata filter (SELECT) has
+            // hidden some, offset by 2 for the two reserved tiles above.
+            int titleIndex = (int)state.visible[choice - 2];
             show_game_detail(&state, &tokens, titleIndex);
             // Picks up newly-created Checkpoint backups and any title
             // list changes (cart swap, freshly installed game) each time

@@ -36,3 +36,30 @@ typedef struct {
 // can't be opened at all (e.g. Checkpoint has never been run on this SD
 // card).
 bool checkpoint_list_backups(u64 titleId, CheckpointBackup *out, int maxBackups, int *outCount);
+
+// Same as checkpoint_list_backups(), but for a folder already known by
+// path (see checkpoint_list_title_folders()) instead of resolving one
+// from a titleId -- used for a Checkpoint-only title main.c's automatic
+// filtering doesn't otherwise show (uninstalled, or excluded for some
+// other reason), so there's no titleId on hand to look it up by. Always
+// succeeds (reports zero backups rather than failing) since the folder
+// is already known to exist.
+bool checkpoint_list_backups_in_folder(const char *titleFolder, CheckpointBackup *out, int maxBackups, int *outCount);
+
+typedef struct {
+    char name[256];     // the folder's own name, e.g. "0x12345 Pokemon Y"
+    char fullPath[512]; // sdmc:/... path to that folder
+    u32 uniqueId;       // parsed from the "0x%05X " prefix, 0 if unparseable
+} CheckpointTitleFolder;
+
+// Lists every top-level folder directly under CHECKPOINT_SAVES_DIR --
+// unlike checkpoint_list_backups() (which needs a specific titleId to
+// match against), this lists everything Checkpoint has ever backed up,
+// whether or not it matches a currently-installed title. The point is to
+// surface backups for a title this app's own automatic filtering (or an
+// uninstalled/removed game) would otherwise hide entirely -- main.c's
+// "Checkpoint" home-screen tile browses this list directly. Sorted
+// alphabetically by folder name. Writes up to maxFolders into `out`,
+// actual count into *outCount. Returns false only if CHECKPOINT_SAVES_DIR
+// itself can't be opened (Checkpoint's never been run on this SD card).
+bool checkpoint_list_title_folders(CheckpointTitleFolder *out, int maxFolders, int *outCount);

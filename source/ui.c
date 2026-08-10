@@ -290,7 +290,7 @@ static void draw_person_icon(float cx, float cy, float scale, u32 color) {
 }
 
 // "KONNECT3DS" at the left, the logged-in account's email at the right
-// (or "•••••• (oculto)" if ui_toggle_email_visibility() hid it; blank if
+// (or "****** (hidden)" if ui_toggle_email_visibility() hid it; blank if
 // logged out, or before ui_set_account_email() has been told otherwise)
 // next to a small person icon (X opens the account menu -- see
 // ui_run_icon_grid()), a rule underneath -- the top screen's persistent
@@ -307,7 +307,7 @@ static void draw_top_header(void) {
         // uses elsewhere has no real Unicode coverage (see
         // title_name.c's utf16_field_to_ascii()), so anything fancier
         // risks a missing-glyph box instead of an actual mask.
-        const char *shown = s_emailHidden ? "****** (email oculto)" : s_accountEmail;
+        const char *shown = s_emailHidden ? "****** (hidden)" : s_accountEmail;
         draw_text_aligned(TOP_W - MARGIN_X - 24.0f, 8.0f, TEXT_SCALE, COLOR_ACCENT, shown, true, C2D_AlignRight);
     }
     C2D_DrawRectSolid(MARGIN_X, HEADER_BAR_HEIGHT - 4.0f, 0.0f, TOP_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
@@ -364,7 +364,12 @@ static void draw_icon_grid(void) {
             C2D_DrawRectSolid(x - 4.0f, y - 4.0f, 0.0f, ICON_TILE_SIZE + 8.0f, ICON_TILE_SIZE + 8.0f, COLOR_SELECT_BG);
         }
 
-        if (i == 0) {
+        if (i == 0 || i == 1) {
+            // Tile 0 (import) and tile 1 (browse Checkpoint's own saves
+            // folder -- see UI_GRID_CHECKPOINT) share the one folder-icon
+            // asset there is; the caption below tells them apart, same as
+            // every other tile relies on getLabel() rather than a unique
+            // icon per entry.
             if (s_folderIconLoaded) {
                 C2D_DrawImageAt(s_folderIcon, x, y, 0.0f, NULL,
                                  ICON_TILE_SIZE / s_folderIcon.subtex->width,
@@ -375,7 +380,7 @@ static void draw_icon_grid(void) {
             continue;
         }
 
-        int titleIdx = i - 1;
+        int titleIdx = i - 2;
         if (titleIdx < s_titleIconCount && s_titleIconValid[titleIdx]) {
             C2D_Image img = { &s_titleIconTex[titleIdx], &s_titleIconSubtex };
             C2D_DrawImageAt(img, x, y, 0.0f, NULL, ICON_TILE_SIZE / 48.0f, ICON_TILE_SIZE / 48.0f);
@@ -593,13 +598,13 @@ static void draw_confirm(void) {
 // footer.
 static void draw_grid_bottom_footer(void) {
     float y = BOTTOM_H - MARGIN_Y - GRID_FOOTER_LINES * LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Direcional: navegar", false); y += LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "L / R: pular de pagina", false); y += LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A: abrir", false); y += LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "X: gerenciar conta", false); y += LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Y: backup de tudo", false); y += LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "SELECT: so com dados extras", false); y += LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "START: sair do app", false);
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "D-Pad: navigate", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "L / R: jump a page", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A: open", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "X: manage account", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Y: back up everything", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "SELECT: extra data only", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "START: exit app", false);
 }
 
 static void present(ui_top_draw_fn drawTop, void *topUserdata) {
@@ -731,7 +736,7 @@ bool ui_confirm(const char *prompt) {
 }
 
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
-    s_grid.count = 1 + s_titleIconCount;
+    s_grid.count = 2 + s_titleIconCount; // tile 0 = import, tile 1 = browse Checkpoint
     s_grid.cols = grid_cols();
     if (s_grid.selected >= s_grid.count) s_grid.selected = 0;
     s_grid.scrollRow = 0;
@@ -813,15 +818,15 @@ bool ui_run_login_gate(void) {
         draw_background(TOP_W, TOP_H, false);
         draw_top_header();
         draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f - 30.0f, 0.9f, COLOR_ACCENT,
-                           "Fazer login no Dropbox", true, C2D_AlignCenter);
+                           "Log in to Dropbox", true, C2D_AlignCenter);
         draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f + 6.0f, TEXT_SCALE, COLOR_MUTED,
-                           "Pressione A para continuar", false, C2D_AlignCenter);
+                           "Press A to continue", false, C2D_AlignCenter);
 
         C2D_TargetClear(s_bottom, COLOR_BG);
         C2D_SceneBegin(s_bottom);
         draw_background(BOTTOM_W, BOTTOM_H, true);
         draw_text_aligned(BOTTOM_W / 2.0f, BOTTOM_H / 2.0f, TEXT_SCALE, COLOR_MUTED,
-                           "A = login    START = sair", false, C2D_AlignCenter);
+                           "A = login    START = exit", false, C2D_AlignCenter);
 
         C3D_FrameEnd(0);
 
