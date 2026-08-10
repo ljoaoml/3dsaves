@@ -546,7 +546,7 @@ static void draw_confirm(void) {
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A = yes    B = no", false);
 }
 
-#define GRID_FOOTER_LINES 5
+#define GRID_FOOTER_LINES 6
 
 // The icon grid's bottom screen: fixed control hints, anchored to the
 // bottom of the screen (a footer) rather than the top -- there's nothing
@@ -559,6 +559,7 @@ static void draw_grid_bottom_footer(void) {
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "L / R: pular de pagina", false); y += LINE_HEIGHT;
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A: abrir", false); y += LINE_HEIGHT;
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "X: gerenciar conta", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Y: backup de tudo", false); y += LINE_HEIGHT;
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "START: sair do app", false);
 }
 
@@ -747,6 +748,7 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
             else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
             else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
             else if (kDown & (KEY_X | KEY_SELECT)) { result = UI_GRID_ACCOUNT; goto done; }
+            else if (kDown & KEY_Y) { result = UI_GRID_BACKUP_ALL; goto done; }
             else gspWaitForVBlank();
         }
     }

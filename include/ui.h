@@ -112,11 +112,14 @@ bool ui_is_email_hidden(void);
 // UI_GRID_EXIT, X or SELECT returns UI_GRID_ACCOUNT (X is the primary
 // account-menu button -- there's a small person icon in the header as a
 // visual reminder, but it isn't independently selectable, just a hint
-// that X does something there; SELECT still works too) -- main.c tells
-// these apart from a real tile pick since none of them are valid indices.
-#define UI_GRID_CANCEL  (-1)
-#define UI_GRID_EXIT    (-2)
-#define UI_GRID_ACCOUNT (-3)
+// that X does something there; SELECT still works too), Y returns
+// UI_GRID_BACKUP_ALL (back up every listed title's live save in one go)
+// -- main.c tells all of these apart from a real tile pick since none of
+// them are valid indices.
+#define UI_GRID_CANCEL     (-1)
+#define UI_GRID_EXIT       (-2)
+#define UI_GRID_ACCOUNT    (-3)
+#define UI_GRID_BACKUP_ALL (-4)
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata);
 
 // Big centered "Log in to Dropbox" prompt, shown before the icon grid the

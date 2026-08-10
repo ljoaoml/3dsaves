@@ -36,11 +36,24 @@ static const char *title_display_name(const InstalledTitle *t) {
 
 // ui_run_icon_grid()'s caption callback: index 0 is always its reserved
 // folder/import tile, 1..N line up with title_icon_pixels() below (same
-// state->titles indexing, offset by 1).
+// state->titles indexing, offset by 1). The physical game card slot can
+// only ever hold one title at a time and is easy to mix up with an
+// SD-installed game sharing a similar name, so it's flagged in the
+// caption -- display-only (a static scratch buffer, safe since only one
+// caption is ever read per frame): title_display_name() itself is left
+// alone since it also feeds Dropbox path building elsewhere, and a
+// "(Cartridge)" suffix has no business ending up in a Dropbox folder name.
 static const char *grid_label(int index, void *userdata) {
     const MenuState *state = (const MenuState *)userdata;
     if (index == 0) return "Import from SD/3DS folder";
-    return title_display_name(&state->titles[index - 1]);
+
+    const InstalledTitle *t = &state->titles[index - 1];
+    const char *name = title_display_name(t);
+    if (t->mediaType != MEDIATYPE_GAME_CARD) return name;
+
+    static char labelBuf[80];
+    snprintf(labelBuf, sizeof(labelBuf), "%s (Cartucho)", name);
+    return labelBuf;
 }
 
 static const u16 *title_icon_pixels(int index, void *userdata) {
@@ -377,6 +390,79 @@ static void show_game_detail(MenuState *state, DropboxTokens *tokens, int titleI
     }
 }
 
+// Y on the icon grid: backs up and uploads every listed title's current
+// live save in one pass, for "about to swap cards / wipe the SD card"
+// moments where visiting each game one at a time would be tedious. Only
+// the main live save -- not extdata, not existing Checkpoint backup
+// instances -- keeping the batch to the one thing every listed title
+// always has, same reasoning as upload_local_backup()'s "live" entry.
+// Keeps going past a single title's failure (network hiccup, one bad
+// save archive) instead of aborting the whole run, and reports which
+// ones failed at the end.
+static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
+    if (state->titleCount == 0) {
+        ui_clear();
+        ui_print_error("\nNenhum jogo para fazer backup.\n");
+        ui_wait_for_a();
+        return;
+    }
+
+    if (!ui_confirm("Fazer backup de todos os jogos para o Dropbox?")) return;
+
+    char timestamp[64];
+    time_t now = time(NULL);
+    struct tm *tmNow = localtime(&now);
+    if (tmNow) strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tmNow);
+    else snprintf(timestamp, sizeof(timestamp), "backup");
+
+    int okCount = 0, failCount = 0;
+    char failedNames[512] = {0};
+
+    for (u32 i = 0; i < state->titleCount; i++) {
+        InstalledTitle *t = &state->titles[i];
+        const char *gameName = title_display_name(t);
+
+        ui_clear();
+        ui_printf("Backup %lu/%lu: %s...\n",
+                   (unsigned long)(i + 1), (unsigned long)state->titleCount, gameName);
+        ui_flush();
+
+        Result rc = saves_backup_title(t, TMP_ZIP_PATH);
+        bool ok = R_SUCCEEDED(rc);
+        if (ok) {
+            char dropboxPath[192];
+            dropbox_build_backup_path(gameName, timestamp, dropboxPath, sizeof(dropboxPath));
+            char error[256];
+            ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+            remove(TMP_ZIP_PATH);
+        }
+
+        if (ok) {
+            okCount++;
+        } else {
+            failCount++;
+            size_t used = strlen(failedNames);
+            if (used + strlen(gameName) + 3 < sizeof(failedNames)) {
+                if (used > 0) strncat(failedNames, ", ", sizeof(failedNames) - used - 1);
+                strncat(failedNames, gameName, sizeof(failedNames) - strlen(failedNames) - 1);
+            }
+        }
+    }
+
+    ui_clear();
+    if (failCount == 0) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "\nBackup de %d jogos concluido.\n", okCount);
+        ui_print_success(msg);
+    } else {
+        char msg[768];
+        snprintf(msg, sizeof(msg), "\nBackup de %d jogos concluido, %d falharam:\n%s\n",
+                 okCount, failCount, failedNames);
+        ui_print_error(msg);
+    }
+    ui_wait_for_a();
+}
+
 // Strips Checkpoint's "0x%05X " title-unique-id prefix (see
 // CHECKPOINT_SAVES_DIR's comment above) off a folder's basename, if
 // present, so a Checkpoint-sourced folder gets a clean game name on
@@ -577,6 +663,12 @@ int main(void) {
             if (choice == UI_GRID_ACCOUNT) {
                 show_account_menu(&state, &tokens);
                 if (!state.loggedIn) break; // logged out: back to the outer loop's login gate
+                continue;
+            }
+
+            if (choice == UI_GRID_BACKUP_ALL) {
+                backup_all_titles(&state, &tokens);
+                refresh_titles(&state);
                 continue;
             }
 
