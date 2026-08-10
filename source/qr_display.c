@@ -2,9 +2,14 @@
 #include "qrcodegen.h"
 
 #include <3ds.h>
+#include <citro2d.h>
 #include <stdlib.h>
-#include <string.h>
 
+// citro2d's logical top-screen coordinate space: 400x240, (0,0) at the
+// top-left in normal (non-rotated) orientation. Unlike the old raw
+// framebuffer version, there's no manual rotation/byte-layout math here
+// -- citro2d handles the physical screen's rotated memory layout
+// internally, draw calls just use plain logical (x, y).
 #define SCREEN_W 400
 #define SCREEN_H 240
 
@@ -21,21 +26,6 @@ struct QrCode {
     int originX;
     int originY;
 };
-
-// Pixel format/indexing: confirmed correct on real hardware by explicitly
-// forcing GSP_BGR8_OES (3 bytes/pixel) instead of trusting whatever this
-// devkitPro version's default happens to be, and using the plain (no
-// vertical flip) index despite the top screen's framebuffer being
-// reported as 240(w) x 400(h) by gfxGetFramebuffer (the 90-degree-rotated
-// raw layout):
-//   idx = (x * SCREEN_H + y) * 3
-static void put_pixel(u8 *fb, int x, int y, u8 r, u8 g, u8 b) {
-    if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H) return;
-    int idx = (x * SCREEN_H + y) * 3;
-    fb[idx + 0] = b;
-    fb[idx + 1] = g;
-    fb[idx + 2] = r;
-}
 
 QrCode *qr_prepare(const char *text) {
     uint8_t *data = malloc(QR_BUFFER_LEN);
@@ -78,27 +68,27 @@ QrCode *qr_prepare(const char *text) {
     return qr;
 }
 
-void qr_draw_frame(const QrCode *qr) {
+void qr_draw_frame(void *userdata) {
+    const QrCode *qr = (const QrCode *)userdata;
     if (!qr) return;
 
-    gfxSetScreenFormat(GFX_TOP, GSP_BGR8_OES);
-    u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    memset(fb, 0xFF, SCREEN_W * SCREEN_H * 3); // white background = quiet zone
+    // White background covering the whole screen first: a QR's "quiet
+    // zone" (light margin around the code) matters for real-world
+    // scanner reliability, and this is drawn over ui.c's own dark theme
+    // background (already cleared by present() before this callback
+    // runs), not a blank slate.
+    C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, (float)SCREEN_W, (float)SCREEN_H,
+                       C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
 
+    u32 black = C2D_Color32(0x00, 0x00, 0x00, 0xFF);
     for (int qy = 0; qy < qr->size; qy++) {
         for (int qx = 0; qx < qr->size; qx++) {
             if (!qrcodegen_getModule(qr->data, qx, qy)) continue;
-            for (int dy = 0; dy < qr->scale; dy++) {
-                for (int dx = 0; dx < qr->scale; dx++) {
-                    put_pixel(fb, qr->originX + qx * qr->scale + dx,
-                              qr->originY + qy * qr->scale + dy, 0, 0, 0);
-                }
-            }
+            C2D_DrawRectSolid((float)(qr->originX + qx * qr->scale),
+                               (float)(qr->originY + qy * qr->scale),
+                               0.0f, (float)qr->scale, (float)qr->scale, black);
         }
     }
-
-    gfxFlushBuffers();
-    gfxSwapBuffers();
 }
 
 void qr_free(QrCode *qr) {

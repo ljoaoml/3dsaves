@@ -58,6 +58,29 @@ static void make_pkce_pair(char verifier_out[128], char challenge_out[128]) {
     base64url_encode(hash, sizeof(hash), challenge_out); // 43 chars
 }
 
+// ui.c's log lines deliberately don't word-wrap (see its comment on
+// why), so a raw URL printed as one line would just run off the right
+// edge of the bottom screen past a certain length -- this is the one
+// place in the app long enough for that to actually matter (it's a
+// fallback for when scanning the QR code isn't possible, not the
+// primary path, but should still be readable). Chunk length is a rough
+// guess at how many characters fit at ui.c's TEXT_SCALE on the 320px
+// bottom screen, not a measured value -- tune once this is visible on
+// real hardware.
+#define URL_WRAP_CHARS 42
+
+static void print_bottom_wrapped(const char *text) {
+    size_t len = strlen(text);
+    for (size_t pos = 0; pos < len; pos += URL_WRAP_CHARS) {
+        char chunk[URL_WRAP_CHARS + 1];
+        size_t n = len - pos < URL_WRAP_CHARS ? len - pos : URL_WRAP_CHARS;
+        memcpy(chunk, text + pos, n);
+        chunk[n] = '\0';
+        ui_print_bottom(chunk);
+        ui_print_bottom("\n");
+    }
+}
+
 // See PASTE_CODE_FILE's comment. Trims surrounding whitespace/newlines
 // (a phone's share/export step often adds a trailing newline).
 static bool check_pasted_code_file(char *codeOut, size_t codeOutSize) {
@@ -231,8 +254,7 @@ bool auth_run_login_flow(DropboxTokens *out) {
     }
     ui_print_bottom("(B to cancel)\n\n");
     ui_print_bottom("Can't scan? Full URL:\n");
-    ui_print_bottom(url);
-    ui_print_bottom("\n");
+    print_bottom_wrapped(url);
     ui_flush();
 
     QrCode *qr = qr_prepare(url);
@@ -245,7 +267,12 @@ bool auth_run_login_flow(DropboxTokens *out) {
     int frame = 0;
 
     while (!haveCode && !haveTokens && !cancelled && !wantManualEntry) {
-        qr_draw_frame(qr);
+        // Draws the QR straight into this same frame's top-screen scene
+        // (see qr_draw_frame()'s comment) instead of qr_display.c owning
+        // its own separate present -- there's only one GPU frame per
+        // vblank, and ui.c's present() already needs to draw the bottom
+        // screen's instructions every frame regardless.
+        ui_flush_with_top(qr_draw_frame, qr);
 
         hidScanInput();
         u32 kDown = hidKeysDown();
@@ -268,19 +295,13 @@ bool auth_run_login_flow(DropboxTokens *out) {
 
     qr_free(qr);
 
-    // qr_draw_frame() forces the top screen into GSP_BGR8_OES every frame
-    // to plot QR pixels directly and never sets it back; put it back to
-    // the console's own default format before printing through it again.
-    // And since the screen is double-buffered, a single consoleClear()
-    // only wipes whichever buffer is currently the *back* one -- the
-    // other still holds raw QR pixels until the next swap, which shows
-    // up as a half-QR/half-garbage frame. Clearing+flushing twice
-    // guarantees both buffers are wiped before anything else gets drawn.
-    gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
-    ui_clear();
-    ui_flush();
-    ui_clear();
-    ui_flush();
+    // No manual top-screen cleanup needed here anymore: unlike the old
+    // raw-framebuffer QR renderer, ui_flush_with_top() draws the QR into
+    // the same citro2d scene/present cycle as everything else, and
+    // main.c already unconditionally clears+flushes the top screen right
+    // after this function returns (every return path, including this
+    // one) -- there's no leftover pixel state a screen format switch or
+    // an extra double-buffer-safe clear could even leave behind.
 
     if (cancelled) return false;
 
@@ -320,6 +341,13 @@ bool auth_run_login_flow(DropboxTokens *out) {
                               (const u8 *)body, (u32)bodyLen, &resp);
     if (R_FAILED(rc)) {
         ui_print("Network error contacting Dropbox.\n");
+        // main.c clears the screen and shows a generic "cancelled or
+        // failed" message right after this returns -- without pausing
+        // here first, this more specific reason would never actually be
+        // visible to the user (nothing's drawn until a flush, and the
+        // next flush is main.c's, by which point ui_clear() already
+        // wiped this line).
+        ui_wait_for_a();
         return false;
     }
 
@@ -330,6 +358,7 @@ bool auth_run_login_flow(DropboxTokens *out) {
     if (!ok) {
         ui_print("Login failed. Response:\n");
         if (resp.body.data) ui_print((const char *)resp.body.data);
+        ui_wait_for_a(); // see the comment on the network-error path above
     }
     http_response_free(&resp);
 
