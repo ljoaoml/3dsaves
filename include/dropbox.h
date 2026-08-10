@@ -47,3 +47,12 @@ typedef struct {
 bool dropbox_list_backups(DropboxTokens *tokens, const char *gameName,
                            DropboxBackupEntry *out, int maxEntries, int *outCount,
                            char *errorOut, size_t errorOutSize);
+
+// Fetches the logged-in account's email address (POST
+// /2/users/get_current_account, which takes no arguments -- Dropbox's own
+// documented convention for that is a literal "null" JSON body) into
+// `out`. Returns false (leaving `out` empty) on any failure; this is
+// purely cosmetic (shown in the top screen's header), so callers should
+// treat a failure here as "just don't show an email" rather than
+// something worth surfacing to the user.
+bool dropbox_get_account_email(DropboxTokens *tokens, char *out, size_t outSize);

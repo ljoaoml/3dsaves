@@ -64,15 +64,45 @@ void ui_print_bottom(const char *text);
 void ui_printf_bottom(const char *fmt, ...);
 void ui_print_header_bottom(const char *title);
 
-// Builds (and replaces any previous set of) the title icon "shelf" drawn
-// across the top of the top screen in the normal log view -- get_pixels(i,
-// userdata) must return either NULL ("no icon", drawn as a plain
-// placeholder tile) or a pointer to TITLE_BIG_ICON_PIXELS (see
-// title_name.h) u16s of raw RGB565 icon data; the pixel data is copied
-// into GPU textures immediately and not referenced afterward, so a
-// temporary buffer is fine. Call this again (main.c does, after every
-// title list refresh) to replace the whole shelf; pass count 0 to clear
-// it. ui.c intentionally doesn't know about InstalledTitle/saves.h --
-// this callback indirection keeps it a generic rendering module.
+// Builds (and replaces any previous set of) the title icon textures used
+// by ui_run_icon_grid() -- get_pixels(i, userdata) must return either NULL
+// ("no icon", drawn as a plain placeholder tile) or a pointer to
+// TITLE_BIG_ICON_PIXELS (see title_name.h) u16s of raw RGB565 icon data;
+// the pixel data is copied into GPU textures immediately and not
+// referenced afterward, so a temporary buffer is fine. Call this again
+// (main.c does, after every title list refresh) to replace the whole set;
+// pass count 0 to clear it. ui.c intentionally doesn't know about
+// InstalledTitle/saves.h -- this callback indirection keeps it a generic
+// rendering module.
 typedef const u16 *(*ui_icon_pixels_fn)(int index, void *userdata);
 void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata);
+
+// Sets (copies in) the account email shown at the top-right of the icon
+// grid's header bar. NULL or "" clears it (shown logged-out/unknown).
+void ui_set_account_email(const char *email);
+
+// Interactive icon grid: the top screen's main "home" page once logged
+// in. Tile 0 is always a reserved "import from folder" tile (drawn from
+// the loaded folder icon texture); tiles 1..N are whatever
+// ui_set_home_icons() last built, in the same order. get_label(i,
+// userdata) (optional; same contract as ui_run_menu()'s, but index 0
+// means the folder tile) supplies the caption shown under the grid for
+// whichever tile is currently highlighted.
+//
+// Left/Right move the highlight and wrap around the whole grid; Up/Down
+// move a full row and clamp at the top/bottom instead of wrapping (see
+// ui.c for why). A confirms, returning the highlighted tile's index (0 =
+// folder/import, 1..N = title index N-1). B returns UI_GRID_CANCEL, START
+// returns UI_GRID_EXIT, SELECT returns UI_GRID_LOGOUT -- main.c tells
+// these apart from a real tile pick since none of them are valid indices.
+#define UI_GRID_CANCEL (-1)
+#define UI_GRID_EXIT   (-2)
+#define UI_GRID_LOGOUT (-3)
+int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata);
+
+// Big centered "Log in to Dropbox" prompt, shown before the icon grid the
+// first time the app isn't logged in yet. Blocks until A (returns true,
+// caller should then run the actual login flow) or START (returns false,
+// meaning "give up" -- caller should exit the app rather than loop this
+// screen forever with nothing else reachable from it).
+bool ui_run_login_gate(void);

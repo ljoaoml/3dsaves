@@ -36,13 +36,21 @@
 #define MARGIN_Y 6.0f
 #define VISIBLE_LOG_LINES 15 // (240 - 2*MARGIN_Y) / LINE_HEIGHT, floored
 
-// Title icon "shelf" across the top of the top screen (see
-// ui_set_home_icons()). Tiles are drawn at a fixed size regardless of the
-// SMDH icon's native 48x48 -- C2D_DrawImageAt's scale factors handle that.
-#define ICON_TILE_SIZE 32.0f
-#define ICON_TILE_GAP 6.0f
-#define ICON_SHELF_Y MARGIN_Y
-#define ICON_SHELF_HEIGHT (ICON_TILE_SIZE + 10.0f)
+// Top-screen header bar (see draw_top_header()): "KONNECT3DS" at the left,
+// the logged-in Dropbox account email at the right.
+#define HEADER_BAR_HEIGHT 30.0f
+#define HEADER_TEXT_SCALE 0.62f
+
+// Icon grid (see ui_run_icon_grid()): tiles are drawn at a fixed size
+// regardless of the SMDH icon's native 48x48 -- C2D_DrawImageAt's scale
+// factors handle that. This is the top screen's actual page content while
+// the grid is active, not a decorative header strip -- it starts right
+// below the header bar and a caption line for the highlighted item's name
+// is reserved below the tiles.
+#define ICON_TILE_SIZE 56.0f
+#define ICON_TILE_GAP 14.0f
+#define ICON_GRID_Y (HEADER_BAR_HEIGHT + 10.0f)
+#define ICON_CAPTION_HEIGHT 22.0f
 
 // Cleared once per present() (confirmed against devkitPro's own
 // system-font example: C2D_TextBufClear() is called once per frame, not
@@ -68,8 +76,9 @@ static C2D_SpriteSheet s_folderIconSheet;
 static C2D_Image s_folderIcon;
 static bool s_folderIconLoaded;
 
-// Title icon shelf (see ui_set_home_icons()). Every title icon is built
-// the same way -- 48x48 source data copied top-left-anchored into a 64x64
+// Title icon textures (see ui_set_home_icons()), drawn by the icon grid
+// (ui_run_icon_grid()/draw_icon_grid()). Every title icon is built the
+// same way -- 48x48 source data copied top-left-anchored into a 64x64
 // GPU_RGB565 texture -- so they all share one subtexture describing that
 // same 48x48-within-64x64 region; only the underlying C3D_Tex differs
 // per title. `valid[i]` false means index i's C3D_Tex was never
@@ -91,12 +100,26 @@ static u32 COLOR_DANGER;
 static u32 COLOR_SELECT_BG;
 static u32 COLOR_SELECT_TEXT;
 
+// Account email shown at the top-right of the header bar (see
+// draw_top_header()) -- empty when logged out. Copied in, not just
+// pointed at, since callers (main.c) may not keep their own buffer alive.
+static char s_accountEmail[128];
+
+// What the top screen shows in the normal ui_flush()/ui_run_menu() path
+// (i.e. when ui_flush_with_top()'s custom callback isn't in play) --
+// TOP_GRID is ui_run_icon_grid()'s own screen; everything else
+// (ui_print()'s scrolling log, headers, error/status messages) is
+// TOP_LOG, same as before this existed.
+typedef enum { TOP_LOG, TOP_GRID } TopMode;
+static TopMode s_topMode = TOP_LOG;
+
 typedef enum { LOG_TEXT, LOG_RULE } LogKind;
 
 typedef struct {
     char text[256];
     u32 color;
     LogKind kind;
+    bool bold;
 } LogLine;
 
 #define MAX_LOG_LINES 200
@@ -122,6 +145,21 @@ static struct {
 } s_menu;
 
 static const char *s_confirmPrompt;
+
+// ui_run_icon_grid()'s navigation state. Tile 0 is always the reserved
+// "import from folder" tile (drawn from the folder icon texture, not
+// title-icon data); tiles 1..titleCount are whatever ui_set_home_icons()
+// last built. getLabel (optional) supplies the caption shown under the
+// grid for the highlighted tile -- index 0 for the folder tile, same
+// indices as get_pixels() otherwise.
+static struct {
+    int count; // 1 + title count
+    int cols;
+    int selected;
+    int scrollRow;
+    ui_menu_label_fn getLabel;
+    void *userdata;
+} s_grid;
 
 static void free_home_icons(void) {
     for (int i = 0; i < s_titleIconCount; i++) {
@@ -171,36 +209,103 @@ void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata) 
     }
 }
 
-// Horizontal strip of icon tiles across the top of the top screen: the
-// folder icon (standing in for "browse SD card" -- there's no menu index
-// tied to it, it's just decorative context for what the icon shelf is
-// showing) followed by up to as many title icons as fit. Purely a visual
-// "here are your games" header; unlike the bottom screen's ui_run_menu(),
-// nothing here is independently selectable -- see ui_set_home_icons()'s
-// doc comment for why that scope was cut.
-static void draw_icon_shelf(void) {
-    float x = MARGIN_X;
-    float y = ICON_SHELF_Y;
+// Every piece of text in this file goes through here so "bold" means one
+// thing everywhere: redrawing the same parsed text 0.5px right of itself.
+// citro2d's system font has no real bold weight to switch to, so this is
+// a cheap approximation (thickened strokes, not a true different glyph
+// set) -- good enough at the small sizes this UI uses, and it's what the
+// purple/bold palette change below actually asked for.
+static void draw_text_aligned(float x, float y, float scale, u32 color, const char *text, bool bold, u32 alignFlags) {
+    C2D_Text t;
+    C2D_TextParse(&t, s_textBuf, text);
+    C2D_TextOptimize(&t);
+    u32 flags = C2D_WithColor | alignFlags;
+    if (bold) C2D_DrawText(&t, flags, x + 0.5f, y, 0.0f, scale, scale, color);
+    C2D_DrawText(&t, flags, x, y, 0.0f, scale, scale, color);
+}
+
+static void draw_text(float x, float y, float scale, u32 color, const char *text, bool bold) {
+    draw_text_aligned(x, y, scale, color, text, bold, C2D_AlignLeft);
+}
+
+void ui_set_account_email(const char *email) {
+    if (email && email[0]) snprintf(s_accountEmail, sizeof(s_accountEmail), "%s", email);
+    else s_accountEmail[0] = '\0';
+}
+
+// "KONNECT3DS" at the left, the logged-in account's email at the right
+// (blank if logged out, or before ui_set_account_email() has been told
+// otherwise), a rule underneath -- the top screen's persistent header
+// while the icon grid is showing.
+static void draw_top_header(void) {
+    draw_text(MARGIN_X, 6.0f, HEADER_TEXT_SCALE, COLOR_ACCENT, "KONNECT3DS", true);
+    if (s_accountEmail[0]) {
+        draw_text_aligned(TOP_W - MARGIN_X, 8.0f, TEXT_SCALE, COLOR_ACCENT, s_accountEmail, true, C2D_AlignRight);
+    }
+    C2D_DrawRectSolid(MARGIN_X, HEADER_BAR_HEIGHT - 4.0f, 0.0f, TOP_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
+}
+
+static int grid_cols(void) {
+    int cols = (int)((TOP_W - 2 * MARGIN_X + ICON_TILE_GAP) / (ICON_TILE_SIZE + ICON_TILE_GAP));
+    return cols < 1 ? 1 : cols;
+}
+
+static int grid_visible_rows(void) {
+    float availH = TOP_H - ICON_GRID_Y - ICON_CAPTION_HEIGHT - MARGIN_Y;
+    int rows = (int)((availH + ICON_TILE_GAP) / (ICON_TILE_SIZE + ICON_TILE_GAP));
+    return rows < 1 ? 1 : rows;
+}
+
+// The icon grid itself: tile 0 is always the reserved folder/import tile,
+// tiles 1..s_grid.count-1 are title icons (see ui_set_home_icons()) --
+// this is the top screen's actual page content while ui_run_icon_grid()
+// is active, occupying most of the screen below draw_top_header(), not a
+// decorative strip. The highlighted tile gets a solid frame drawn behind
+// it (in COLOR_SELECT_BG, currently the same purple as everything else --
+// see ui_init()) before the icon itself, and the highlighted item's own
+// name is captioned below the grid via s_grid.getLabel().
+static void draw_icon_grid(void) {
+    int cols = s_grid.cols;
+    int visibleRows = grid_visible_rows();
     float step = ICON_TILE_SIZE + ICON_TILE_GAP;
 
-    if (s_folderIconLoaded) {
-        C2D_DrawImageAt(s_folderIcon, x, y, 0.0f, NULL,
-                         ICON_TILE_SIZE / s_folderIcon.subtex->width,
-                         ICON_TILE_SIZE / s_folderIcon.subtex->height);
-        x += step;
-    }
+    for (int i = 0; i < s_grid.count; i++) {
+        int row = i / cols;
+        if (row < s_grid.scrollRow || row >= s_grid.scrollRow + visibleRows) continue;
+        int col = i % cols;
+        float x = MARGIN_X + col * step;
+        float y = ICON_GRID_Y + (row - s_grid.scrollRow) * step;
 
-    int maxTiles = (int)((TOP_W - x) / step);
-    if (maxTiles < 0) maxTiles = 0;
-    int shown = s_titleIconCount < maxTiles ? s_titleIconCount : maxTiles;
-    for (int i = 0; i < shown; i++) {
-        if (s_titleIconValid[i]) {
-            C2D_Image img = { &s_titleIconTex[i], &s_titleIconSubtex };
+        if (i == s_grid.selected) {
+            C2D_DrawRectSolid(x - 4.0f, y - 4.0f, 0.0f, ICON_TILE_SIZE + 8.0f, ICON_TILE_SIZE + 8.0f, COLOR_SELECT_BG);
+        }
+
+        if (i == 0) {
+            if (s_folderIconLoaded) {
+                C2D_DrawImageAt(s_folderIcon, x, y, 0.0f, NULL,
+                                 ICON_TILE_SIZE / s_folderIcon.subtex->width,
+                                 ICON_TILE_SIZE / s_folderIcon.subtex->height);
+            } else {
+                C2D_DrawRectSolid(x, y, 0.0f, ICON_TILE_SIZE, ICON_TILE_SIZE, COLOR_MUTED);
+            }
+            continue;
+        }
+
+        int titleIdx = i - 1;
+        if (titleIdx < s_titleIconCount && s_titleIconValid[titleIdx]) {
+            C2D_Image img = { &s_titleIconTex[titleIdx], &s_titleIconSubtex };
             C2D_DrawImageAt(img, x, y, 0.0f, NULL, ICON_TILE_SIZE / 48.0f, ICON_TILE_SIZE / 48.0f);
         } else {
             C2D_DrawRectSolid(x, y, 0.0f, ICON_TILE_SIZE, ICON_TILE_SIZE, COLOR_MUTED);
         }
-        x += step;
+    }
+
+    if (s_grid.getLabel) {
+        const char *caption = s_grid.getLabel(s_grid.selected, s_grid.userdata);
+        if (caption) {
+            float captionY = TOP_H - MARGIN_Y - ICON_CAPTION_HEIGHT + 4.0f;
+            draw_text(MARGIN_X, captionY, TEXT_SCALE, COLOR_ACCENT, caption, true);
+        }
     }
 }
 
@@ -224,19 +329,22 @@ void ui_init(void) {
     s_folderIconLoaded = s_folderIconSheet != NULL;
     if (s_folderIconLoaded) s_folderIcon = C2D_SpriteSheetGetImage(s_folderIconSheet, 0);
 
-    // A small, dark, teal-accented palette -- not trying to be a
-    // pixel-exact clone of any particular app, just a reasonable-looking
-    // starting point on top of real GPU rendering instead of the 16-color
-    // console palette this replaces. Easy to retune once it's actually
-    // visible on hardware; nothing else in this file depends on the
-    // specific values.
-    COLOR_BG          = C2D_Color32(0x16, 0x18, 0x1D, 0xFF);
-    COLOR_TEXT        = C2D_Color32(0xE8, 0xEA, 0xED, 0xFF);
-    COLOR_MUTED       = C2D_Color32(0x8A, 0x90, 0x9C, 0xFF);
-    COLOR_ACCENT      = C2D_Color32(0x4F, 0xD1, 0xC5, 0xFF);
-    COLOR_SUCCESS     = C2D_Color32(0x4C, 0xAF, 0x50, 0xFF);
-    COLOR_DANGER      = C2D_Color32(0xE5, 0x39, 0x35, 0xFF);
-    COLOR_SELECT_BG   = C2D_Color32(0x24, 0x3B, 0x3A, 0xFF);
+    // #5854C1 -- the exact purple from the mockup/folder icon asset (its
+    // source file was literally named "#5854c1.png") -- as the one accent
+    // color text is drawn in throughout, per feedback that the previous
+    // near-white palette was invisible against the new light background
+    // pattern. COLOR_BG is just the fallback if that background texture
+    // fails to load (see draw_background()), so it's a light cream in the
+    // same family rather than the near-black it used to be, for the same
+    // reason. Easy to retune further once seen on hardware; nothing else
+    // in this file depends on the specific values.
+    COLOR_BG          = C2D_Color32(0xFF, 0xF6, 0xE3, 0xFF);
+    COLOR_TEXT        = C2D_Color32(0x58, 0x54, 0xC1, 0xFF);
+    COLOR_MUTED       = C2D_Color32(0xA8, 0xA4, 0xE0, 0xFF);
+    COLOR_ACCENT      = C2D_Color32(0x58, 0x54, 0xC1, 0xFF);
+    COLOR_SUCCESS     = C2D_Color32(0x2E, 0x7D, 0x32, 0xFF);
+    COLOR_DANGER      = C2D_Color32(0xC6, 0x28, 0x28, 0xFF);
+    COLOR_SELECT_BG   = C2D_Color32(0x58, 0x54, 0xC1, 0xFF);
     COLOR_SELECT_TEXT = C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF);
 }
 
@@ -261,7 +369,7 @@ static void draw_background(float screenW, float screenH) {
     C2D_DrawImageAt(s_bgImage, 0.0f, 0.0f, 0.0f, NULL, scaleX, scaleY);
 }
 
-static void log_append_line(LogLine *lines, int *count, const char *text, u32 color, LogKind kind) {
+static void log_append_line(LogLine *lines, int *count, const char *text, u32 color, LogKind kind, bool bold) {
     if (*count >= MAX_LOG_LINES) {
         memmove(lines, lines + 1, sizeof(LogLine) * (MAX_LOG_LINES - 1));
         (*count)--;
@@ -273,6 +381,7 @@ static void log_append_line(LogLine *lines, int *count, const char *text, u32 co
     dst->text[copyLen] = '\0';
     dst->color = color;
     dst->kind = kind;
+    dst->bold = bold;
     (*count)++;
 }
 
@@ -294,7 +403,7 @@ static void log_append(LogLine *lines, int *count, const char *text, u32 color) 
         size_t copyLen = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
         memcpy(buf, p, copyLen);
         buf[copyLen] = '\0';
-        log_append_line(lines, count, buf, color, LOG_TEXT);
+        log_append_line(lines, count, buf, color, LOG_TEXT, false);
         if (!nl) break;
         p = nl + 1;
     }
@@ -302,7 +411,7 @@ static void log_append(LogLine *lines, int *count, const char *text, u32 color) 
 
 static void draw_log(const LogLine *lines, int count, float screenW, float startY) {
     // VISIBLE_LOG_LINES assumes a MARGIN_Y start; when startY is pushed
-    // down (top screen, icon shelf present), a couple of lines' worth can
+    // down (top screen, header/grid present), a couple of lines' worth can
     // run past the bottom edge before scrolling catches up -- cosmetic
     // scroll-lag, not a crash, and not worth a second constant for.
     int start = count > VISIBLE_LOG_LINES ? count - VISIBLE_LOG_LINES : 0;
@@ -316,10 +425,7 @@ static void draw_log(const LogLine *lines, int count, float screenW, float start
         }
         if (line->text[0] == '\0') { y += LINE_HEIGHT; continue; }
 
-        C2D_Text t;
-        C2D_TextParse(&t, s_textBuf, line->text);
-        C2D_TextOptimize(&t);
-        C2D_DrawText(&t, C2D_WithColor, MARGIN_X, y, 0.0f, TEXT_SCALE, TEXT_SCALE, line->color);
+        draw_text(MARGIN_X, y, TEXT_SCALE, line->color, line->text, line->bold);
         y += LINE_HEIGHT;
     }
 }
@@ -327,10 +433,7 @@ static void draw_log(const LogLine *lines, int count, float screenW, float start
 static void draw_menu(void) {
     float y = MARGIN_Y;
 
-    C2D_Text titleText;
-    C2D_TextParse(&titleText, s_textBuf, s_menu.title);
-    C2D_TextOptimize(&titleText);
-    C2D_DrawText(&titleText, C2D_WithColor, MARGIN_X, y, 0.0f, HEADER_SCALE, HEADER_SCALE, COLOR_ACCENT);
+    draw_text(MARGIN_X, y, HEADER_SCALE, COLOR_ACCENT, s_menu.title, true);
     y += HEADER_HEIGHT;
     C2D_DrawRectSolid(MARGIN_X, y, 0.0f, BOTTOM_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
     y += LINE_HEIGHT * 0.6f;
@@ -344,36 +447,23 @@ static void draw_menu(void) {
             C2D_DrawRectSolid(MARGIN_X - 2, y - 1, 0.0f, BOTTOM_W - 2 * (MARGIN_X - 2), LINE_HEIGHT, COLOR_SELECT_BG);
         }
 
-        C2D_Text itemText;
-        C2D_TextParse(&itemText, s_textBuf, label ? label : "?");
-        C2D_TextOptimize(&itemText);
-        C2D_DrawText(&itemText, C2D_WithColor, MARGIN_X, y, 0.0f, TEXT_SCALE, TEXT_SCALE,
-                     isSelected ? COLOR_SELECT_TEXT : COLOR_TEXT);
+        draw_text(MARGIN_X, y, TEXT_SCALE, isSelected ? COLOR_SELECT_TEXT : COLOR_TEXT, label ? label : "?", false);
         y += LINE_HEIGHT;
     }
 
     y = BOTTOM_H - MARGIN_Y - LINE_HEIGHT;
-    C2D_Text hint;
-    C2D_TextParse(&hint, s_textBuf, "Up/Down select, A confirm, B cancel");
-    C2D_TextOptimize(&hint);
-    C2D_DrawText(&hint, C2D_WithColor, MARGIN_X, y, 0.0f, TEXT_SCALE, TEXT_SCALE, COLOR_MUTED);
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Up/Down select, A confirm, B cancel", false);
 }
 
 static void draw_confirm(void) {
     float y = MARGIN_Y;
 
-    C2D_Text promptText;
-    C2D_TextParse(&promptText, s_textBuf, s_confirmPrompt);
-    C2D_TextOptimize(&promptText);
-    C2D_DrawText(&promptText, C2D_WithColor, MARGIN_X, y, 0.0f, HEADER_SCALE, HEADER_SCALE, COLOR_ACCENT);
+    draw_text(MARGIN_X, y, HEADER_SCALE, COLOR_ACCENT, s_confirmPrompt, true);
     y += HEADER_HEIGHT;
     C2D_DrawRectSolid(MARGIN_X, y, 0.0f, BOTTOM_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
     y += LINE_HEIGHT * 1.5f;
 
-    C2D_Text hint;
-    C2D_TextParse(&hint, s_textBuf, "A = yes    B = no");
-    C2D_TextOptimize(&hint);
-    C2D_DrawText(&hint, C2D_WithColor, MARGIN_X, y, 0.0f, TEXT_SCALE, TEXT_SCALE, COLOR_MUTED);
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A = yes    B = no", false);
 }
 
 static void present(ui_top_draw_fn drawTop, void *topUserdata) {
@@ -388,10 +478,11 @@ static void present(ui_top_draw_fn drawTop, void *topUserdata) {
     draw_background(TOP_W, TOP_H);
     if (drawTop) {
         drawTop(topUserdata);
+    } else if (s_topMode == TOP_GRID) {
+        draw_top_header();
+        draw_icon_grid();
     } else {
-        bool hasShelf = s_titleIconCount > 0 || s_folderIconLoaded;
-        if (hasShelf) draw_icon_shelf();
-        draw_log(s_topLines, s_topCount, TOP_W, hasShelf ? ICON_SHELF_Y + ICON_SHELF_HEIGHT : MARGIN_Y);
+        draw_log(s_topLines, s_topCount, TOP_W, MARGIN_Y);
     }
 
     C2D_TargetClear(s_bottom, COLOR_BG);
@@ -426,8 +517,8 @@ void ui_print_success(const char *text) { log_append(s_topLines, &s_topCount, te
 void ui_print_error(const char *text) { log_append(s_topLines, &s_topCount, text, COLOR_DANGER); }
 
 void ui_print_header(const char *title) {
-    log_append_line(s_topLines, &s_topCount, title, COLOR_ACCENT, LOG_TEXT);
-    log_append_line(s_topLines, &s_topCount, "", COLOR_ACCENT, LOG_RULE);
+    log_append_line(s_topLines, &s_topCount, title, COLOR_ACCENT, LOG_TEXT, true);
+    log_append_line(s_topLines, &s_topCount, "", COLOR_ACCENT, LOG_RULE, false);
 }
 
 void ui_clear_bottom(void) { s_bottomCount = 0; }
@@ -443,8 +534,8 @@ void ui_printf_bottom(const char *fmt, ...) {
 }
 
 void ui_print_header_bottom(const char *title) {
-    log_append_line(s_bottomLines, &s_bottomCount, title, COLOR_ACCENT, LOG_TEXT);
-    log_append_line(s_bottomLines, &s_bottomCount, "", COLOR_ACCENT, LOG_RULE);
+    log_append_line(s_bottomLines, &s_bottomCount, title, COLOR_ACCENT, LOG_TEXT, true);
+    log_append_line(s_bottomLines, &s_bottomCount, "", COLOR_ACCENT, LOG_RULE, false);
 }
 
 int ui_run_menu(const char *title, int count, ui_menu_label_fn get_label, void *userdata) {
@@ -498,6 +589,94 @@ bool ui_confirm(const char *prompt) {
 
     s_bottomMode = BOTTOM_LOG;
     return result;
+}
+
+int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
+    s_grid.count = 1 + s_titleIconCount;
+    s_grid.cols = grid_cols();
+    if (s_grid.selected >= s_grid.count) s_grid.selected = 0;
+    s_grid.scrollRow = 0;
+    s_grid.getLabel = get_label;
+    s_grid.userdata = userdata;
+    s_topMode = TOP_GRID;
+
+    int visibleRows = grid_visible_rows();
+    int result;
+
+    while (true) {
+        int selRow = s_grid.selected / s_grid.cols;
+        if (selRow < s_grid.scrollRow) s_grid.scrollRow = selRow;
+        if (selRow >= s_grid.scrollRow + visibleRows) s_grid.scrollRow = selRow - visibleRows + 1;
+
+        ui_flush();
+
+        bool decided = false;
+        while (!decided) {
+            hidScanInput();
+            u32 kDown = hidKeysDown();
+            if (kDown & KEY_RIGHT) {
+                s_grid.selected = (s_grid.selected + 1) % s_grid.count;
+                decided = true;
+            } else if (kDown & KEY_LEFT) {
+                s_grid.selected = (s_grid.selected - 1 + s_grid.count) % s_grid.count;
+                decided = true;
+            } else if (kDown & KEY_DOWN) {
+                // Clamp rather than wrap: with a possibly-ragged last row,
+                // wrapping cleanly needs more bookkeeping than a homebrew
+                // grid picker is worth -- "nothing happens at the edge" is
+                // a safe, easy-to-verify fallback that also just cannot
+                // land on an out-of-range index.
+                int next = s_grid.selected + s_grid.cols;
+                if (next < s_grid.count) { s_grid.selected = next; decided = true; }
+            } else if (kDown & KEY_UP) {
+                int next = s_grid.selected - s_grid.cols;
+                if (next >= 0) { s_grid.selected = next; decided = true; }
+            } else if (kDown & KEY_A) { result = s_grid.selected; goto done; }
+            else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
+            else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
+            else if (kDown & KEY_SELECT) { result = UI_GRID_LOGOUT; goto done; }
+            else gspWaitForVBlank();
+        }
+    }
+
+done:
+    s_topMode = TOP_LOG;
+    return result;
+}
+
+// Doesn't go through present()/s_topMode+s_bottomMode: this is the very
+// first screen (before there's any title list or grid state to show), so
+// it just draws both screens directly in its own frame loop -- still
+// redrawing both together every frame, same invariant as present(), just
+// inlined instead of routed through the shared log/menu/grid dispatch.
+bool ui_run_login_gate(void) {
+    while (true) {
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C2D_TextBufClear(s_textBuf);
+
+        C2D_TargetClear(s_top, COLOR_BG);
+        C2D_SceneBegin(s_top);
+        draw_background(TOP_W, TOP_H);
+        draw_top_header();
+        draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f - 30.0f, 0.9f, COLOR_ACCENT,
+                           "Fazer login no Dropbox", true, C2D_AlignCenter);
+        draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f + 6.0f, TEXT_SCALE, COLOR_MUTED,
+                           "Pressione A para continuar", false, C2D_AlignCenter);
+
+        C2D_TargetClear(s_bottom, COLOR_BG);
+        C2D_SceneBegin(s_bottom);
+        draw_background(BOTTOM_W, BOTTOM_H);
+        draw_text_aligned(BOTTOM_W / 2.0f, BOTTOM_H / 2.0f, TEXT_SCALE, COLOR_MUTED,
+                           "A = login    START = sair", false, C2D_AlignCenter);
+
+        C3D_FrameEnd(0);
+
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        if (kDown & KEY_A) return true;
+        if (kDown & KEY_START) return false;
+        gspWaitForVBlank();
+    }
 }
 
 void ui_wait_for_a(void) {

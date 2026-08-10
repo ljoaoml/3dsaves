@@ -29,28 +29,17 @@ typedef struct {
     bool loggedIn;
 } MenuState;
 
-static const char *menu_label(int index, void *userdata) {
-    MenuState *state = (MenuState *)userdata;
-    static char buf[64];
+static const char *title_display_name(const InstalledTitle *t) {
+    return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
+}
 
-    if (index == 0) {
-        return state->loggedIn ? "Log out of Dropbox" : "Log in to Dropbox";
-    }
-    if (index == 1) return "Refresh title list";
-    if (index == 2) return "Import save from folder...";
-    if (index == 3) return "Exit";
-
-    int titleIndex = index - 4;
-    InstalledTitle *t = &state->titles[titleIndex];
-    const char *mediaLabel = t->mediaType == MEDIATYPE_SD ? "SD" : "Cart";
-    if (t->name[0]) {
-        snprintf(buf, sizeof(buf), "%s (%s)", t->name, mediaLabel);
-    } else {
-        snprintf(buf, sizeof(buf), "%s (%s) [%016llX]",
-                 t->productCode[0] ? t->productCode : "????",
-                 mediaLabel, (unsigned long long)t->titleId);
-    }
-    return buf;
+// ui_run_icon_grid()'s caption callback: index 0 is always its reserved
+// folder/import tile, 1..N line up with title_icon_pixels() below (same
+// state->titles indexing, offset by 1).
+static const char *grid_label(int index, void *userdata) {
+    const MenuState *state = (const MenuState *)userdata;
+    if (index == 0) return "Import from SD/3DS folder";
+    return title_display_name(&state->titles[index - 1]);
 }
 
 static const u16 *title_icon_pixels(int index, void *userdata) {
@@ -66,8 +55,13 @@ static void refresh_titles(MenuState *state) {
     ui_set_home_icons((int)state->titleCount, title_icon_pixels, state);
 }
 
-static const char *title_display_name(const InstalledTitle *t) {
-    return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
+// Best-effort: leaves the header's email blank on failure (network error,
+// or somehow not actually logged in) rather than treating it as fatal --
+// see dropbox_get_account_email()'s own doc comment.
+static void refresh_account_email(DropboxTokens *tokens) {
+    char email[128];
+    bool ok = dropbox_get_account_email(tokens, email, sizeof(email));
+    ui_set_account_email(ok ? email : NULL);
 }
 
 // One entry in show_game_detail()'s local-backup picker: either the
@@ -321,27 +315,17 @@ static void selftest_https(const char *label, const char *url) {
     }
 }
 
-int main(void) {
-    // romfsInit() must run before ui_init(): ui_init() loads the
-    // background/folder-icon textures from romfs:/gfx/*.t3x.
-    romfsInit();
-    ui_init();
-    http_init();
-
-    mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
-    mkdir("sdmc:/3ds/Konnect3DS", 0777);
-
-    DropboxTokens tokens;
-    MenuState state = {0};
-    state.loggedIn = auth_load_tokens(&tokens);
-
-    refresh_titles(&state);
-
-    ui_clear();
-    ui_print_header("Konnect3DS - back up game saves to Dropbox");
 #ifndef KONNECT3DS_GIT_HASH
 #define KONNECT3DS_GIT_HASH "unknown"
 #endif
+
+// Runs the startup diagnostics (build hash, system time, HTTPS self-test)
+// into the plain scrolling log -- only meaningful once, right after the
+// app actually starts talking to the network for the first time, not on
+// every logout/login cycle back to the login gate.
+static void run_startup_diagnostics(void) {
+    ui_clear();
+    ui_print_header("Konnect3DS - back up game saves to Dropbox");
     ui_printf("build %s\n", KONNECT3DS_GIT_HASH);
     {
         // TLS certificate validation checks the cert's NotBefore/NotAfter
@@ -371,63 +355,82 @@ int main(void) {
     // client.
     selftest_https("api.dropboxapi.com", "https://api.dropboxapi.com/");
     selftest_https("example.com (control)", "https://example.com/");
+    ui_wait_for_a();
+}
 
-    ui_print("Select a title on the bottom screen, or\n");
-    ui_print("log in to Dropbox first if you haven't yet.\n");
-    ui_flush();
+int main(void) {
+    // romfsInit() must run before ui_init(): ui_init() loads the
+    // background/folder-icon textures from romfs:/gfx/*.t3x.
+    romfsInit();
+    ui_init();
+    http_init();
 
-    while (aptMainLoop()) {
-        int total = 4 + (int)state.titleCount;
-        int choice = ui_run_menu("Konnect3DS", total, menu_label, &state);
+    mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
+    mkdir("sdmc:/3ds/Konnect3DS", 0777);
 
-        if (choice < 0) break; // B on the top-level menu = quit
+    DropboxTokens tokens;
+    MenuState state = {0};
+    state.loggedIn = auth_load_tokens(&tokens);
 
-        if (choice == 0) {
-            if (state.loggedIn) {
+    bool wantExit = false;
+    bool firstRun = true;
+
+    // Outer loop: the login gate on one side, the icon-grid home screen on
+    // the other. Logging out (SELECT on the grid) drops back to the top of
+    // this loop instead of returning from main() -- there's nothing useful
+    // to show once logged out except the login gate itself.
+    while (!wantExit) {
+        while (!state.loggedIn) {
+            if (!ui_run_login_gate()) { wantExit = true; break; }
+            state.loggedIn = auth_run_login_flow(&tokens);
+            if (!state.loggedIn) {
+                ui_clear();
+                ui_print_error("Login cancelled or failed.\n");
+                ui_wait_for_a();
+            }
+        }
+        if (wantExit) break;
+
+        refresh_account_email(&tokens);
+        refresh_titles(&state);
+
+        if (firstRun) {
+            firstRun = false;
+            run_startup_diagnostics();
+        }
+
+        while (aptMainLoop()) {
+            int choice = ui_run_icon_grid(grid_label, &state);
+
+            if (choice == UI_GRID_EXIT) { wantExit = true; break; }
+            if (choice == UI_GRID_CANCEL) continue; // B: no-op at the home screen
+
+            if (choice == UI_GRID_LOGOUT) {
                 if (ui_confirm("Log out of Dropbox?")) {
                     auth_delete_tokens();
                     memset(&tokens, 0, sizeof(tokens));
                     state.loggedIn = false;
-                    ui_print_success("\nLogged out.\n");
-                    ui_flush();
+                    ui_set_account_email(NULL);
+                    break; // back to the outer loop's login gate
                 }
-            } else {
-                state.loggedIn = auth_run_login_flow(&tokens);
-                ui_clear();
-                if (state.loggedIn) {
-                    ui_print_success("Logged in to Dropbox.\n");
-                } else {
-                    ui_print_error("Login cancelled or failed.\n");
-                }
-                ui_flush();
-            }
-        } else if (choice == 1) {
-            refresh_titles(&state);
-            ui_clear();
-            ui_printf("Found %lu titles.\n", (unsigned long)state.titleCount);
-            ui_flush();
-        } else if (choice == 2) {
-            if (!state.loggedIn) {
-                ui_clear();
-                ui_print("Log in to Dropbox first.\n");
-                ui_flush();
-                ui_wait_for_a();
                 continue;
             }
-            import_and_upload(&tokens);
-        } else if (choice == 3) {
-            break;
-        } else {
-            int titleIndex = choice - 4;
-            if (!state.loggedIn) {
-                ui_clear();
-                ui_print("Log in to Dropbox first.\n");
-                ui_flush();
-                ui_wait_for_a();
+
+            if (choice == 0) {
+                import_and_upload(&tokens);
+                refresh_titles(&state);
                 continue;
             }
+
+            int titleIndex = choice - 1;
             show_game_detail(&state, &tokens, titleIndex);
+            // Picks up newly-created Checkpoint backups and any title
+            // list changes (cart swap, freshly installed game) each time
+            // control returns to the home screen, without a manual
+            // "refresh" action to remember to use.
+            refresh_titles(&state);
         }
+        if (!aptMainLoop()) wantExit = true; // system-requested close mid-loop
     }
 
     if (state.titles) free(state.titles);

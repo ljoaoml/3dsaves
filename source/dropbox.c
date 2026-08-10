@@ -9,6 +9,7 @@
 
 #define DROPBOX_UPLOAD_URL "https://content.dropboxapi.com/2/files/upload"
 #define DROPBOX_LIST_FOLDER_URL "https://api.dropboxapi.com/2/files/list_folder"
+#define DROPBOX_GET_ACCOUNT_URL "https://api.dropboxapi.com/2/users/get_current_account"
 
 // Dropbox rejects '/','\','<','>',':','"','|','?','*' and other control
 // characters in a path component (it also syncs to Windows clients, which
@@ -240,4 +241,49 @@ bool dropbox_list_backups(DropboxTokens *tokens, const char *gameName,
     if (outCount) *outCount = count;
     http_response_free(&resp);
     return true;
+}
+
+bool dropbox_get_account_email(DropboxTokens *tokens, char *out, size_t outSize) {
+    if (outSize > 0) out[0] = '\0';
+
+    if (!auth_ensure_valid(tokens, false)) return false;
+
+    HttpResponse resp;
+    Result rc;
+    bool retried = false;
+
+    for (;;) {
+        char authHeader[sizeof(tokens->access_token) + 16]; // "Bearer " + token
+        snprintf(authHeader, sizeof(authHeader), "Bearer %s", tokens->access_token);
+        HttpHeader headers[] = {
+            {"Authorization", authHeader},
+            {"Content-Type", "application/json"},
+        };
+
+        // get_current_account takes no arguments, but Dropbox's RPC-style
+        // endpoints still want a JSON body -- the documented convention
+        // for "no arguments" is a literal "null".
+        static const char body[] = "null";
+        rc = http_request(HTTPC_METHOD_POST, DROPBOX_GET_ACCOUNT_URL, headers, 2,
+                           (const u8 *)body, (u32)(sizeof(body) - 1), &resp);
+        if (R_FAILED(rc)) return false;
+
+        // Same 401-retry contract as dropbox_upload_file() above.
+        if (resp.status_code == 401 && !retried) {
+            http_response_free(&resp);
+            if (auth_ensure_valid(tokens, true)) {
+                retried = true;
+                continue;
+            }
+            return false;
+        }
+
+        break;
+    }
+
+    bool ok = resp.status_code == 200 && resp.body.data &&
+        json_get_string((const char *)resp.body.data, "email", out, outSize);
+
+    http_response_free(&resp);
+    return ok;
 }
