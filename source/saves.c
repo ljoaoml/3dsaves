@@ -291,7 +291,56 @@ static Result backup_raw_gba_save(const InstalledTitle *title, const char *zipPa
     return 0;
 }
 
-static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr,
+// Identifies a physical DS/DSi cartridge sitting in the game card slot --
+// deliberately just the ROM header (game title/code), nothing from the
+// save chip at all: no SPI reads, no writes, none of the risk that comes
+// with actually touching the cart's save memory (unlike GBA VC's
+// isRawGbaSave path above, this project makes no attempt to read a
+// physical DS cart's save itself -- Checkpoint's own SPI driver for that
+// is ~600 lines of chip-specific protocol quirks, and even probing a
+// chip's *type* can involve a test write for some EEPROM sizes). Returns
+// false if no card is inserted, it's a normal 3DS card (FSUSER_GetCardType()
+// == CARD_CTR, nothing special to report), or the header can't be read.
+// On true, `gameCode` (e.g. "IPKE") and `description` (the ROM's own
+// 12-character title) are both filled in, NUL-terminated -- matching
+// exactly what Checkpoint's own probeCard() (3ds/source/titleprobe.cpp)
+// uses to name this cart's Checkpoint folder, so the two agree on where
+// its backups would live.
+bool saves_detect_ds_card(char *gameCode, size_t gameCodeSize, char *description, size_t descSize) {
+    if (gameCodeSize > 0) gameCode[0] = '\0';
+    if (descSize > 0) description[0] = '\0';
+
+    FS_CardType cardType;
+    Result rc = FSUSER_GetCardType(&cardType);
+    if (R_FAILED(rc) || cardType == CARD_CTR) return false;
+
+    u8 header[0x3B4];
+    rc = FSUSER_GetLegacyRomHeader(MEDIATYPE_GAME_CARD, 0, header);
+    if (R_FAILED(rc)) return false;
+
+    char title[13] = {0};
+    memcpy(title, header, 12);
+    char code[5] = {0};
+    memcpy(code, header + 12, 4);
+
+    // Trim trailing NULs/space padding the ROM header's fixed-width title
+    // field leaves behind, same as Checkpoint's own probeCard().
+    for (int i = 11; i >= 0 && (title[i] == '\0' || title[i] == ' '); i--) title[i] = '\0';
+
+    snprintf(gameCode, gameCodeSize, "%s", code);
+    snprintf(description, descSize, "%s", title[0] ? title : code);
+    return true;
+}
+
+// `applyFilters` true is the everyday saves_list_titles() behavior
+// (system-title exclusion + an accessible-save requirement); false is
+// saves_list_all_titles()'s "show literally everything" fallback -- same
+// loop either way, just skipping the two exclusion checks so a title an
+// edge case in those checks still hides gets a place to be found and
+// tried anyway. isRawGbaSave/extdataAccessible are still probed and
+// filled in correctly in both cases, so the normal backup functions work
+// identically on a title found this way.
+static Result list_titles_for_media(FS_MediaType mediatype, bool applyFilters, InstalledTitle **arr,
                                      u32 *count, u32 *capacity) {
     u32 total = 0;
     Result rc = AM_GetTitleCount(mediatype, &total);
@@ -306,7 +355,7 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
 
     for (u32 i = 0; i < read; i++) {
         if (!is_application_title(ids[i])) continue;
-        if (is_system_excluded(ids[i])) continue;
+        if (applyFilters && is_system_excluded(ids[i])) continue;
 
         InstalledTitle candidate;
         candidate.titleId = ids[i];
@@ -320,10 +369,12 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         // injects" section above) but still has a real save reachable
         // the other way, so it isn't excluded, just flagged.
         bool isRawGba = false;
-        if (!savedata_accessible(&candidate)) {
-            if (!rawgba_save_accessible(&candidate)) continue;
-            isRawGba = true;
+        bool accessible = savedata_accessible(&candidate);
+        if (!accessible) {
+            accessible = rawgba_save_accessible(&candidate);
+            isRawGba = accessible;
         }
+        if (applyFilters && !accessible) continue;
 
         if (*count == *capacity) {
             u32 newCapacity = (*capacity == 0) ? 16 : (*capacity * 2);
@@ -359,8 +410,26 @@ Result saves_list_titles(InstalledTitle **out, u32 *count) {
     Result rc = amInit();
     if (R_FAILED(rc)) return rc;
 
-    Result rc1 = list_titles_for_media(MEDIATYPE_SD, out, count, &capacity);
-    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, out, count, &capacity);
+    Result rc1 = list_titles_for_media(MEDIATYPE_SD, true, out, count, &capacity);
+    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, true, out, count, &capacity);
+
+    amExit();
+
+    if (R_FAILED(rc1)) return rc1;
+    if (R_FAILED(rc2)) return rc2;
+    return 0;
+}
+
+Result saves_list_all_titles(InstalledTitle **out, u32 *count) {
+    *out = NULL;
+    *count = 0;
+    u32 capacity = 0;
+
+    Result rc = amInit();
+    if (R_FAILED(rc)) return rc;
+
+    Result rc1 = list_titles_for_media(MEDIATYPE_SD, false, out, count, &capacity);
+    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, false, out, count, &capacity);
 
     amExit();
 

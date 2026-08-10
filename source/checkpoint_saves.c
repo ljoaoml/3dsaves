@@ -119,6 +119,7 @@ bool checkpoint_list_title_folders(CheckpointTitleFolder *out, int maxFolders, i
         CheckpointTitleFolder *f = &out[count];
         snprintf(f->name, sizeof(f->name), "%s", entry->d_name);
         snprintf(f->fullPath, sizeof(f->fullPath), "%s", full);
+        f->isInsertedCartridge = false;
 
         // "0x%05X " prefix -- see CHECKPOINT_SAVES_DIR's own comment.
         // uniqueId stays 0 (no real title uses that as its own unique id)

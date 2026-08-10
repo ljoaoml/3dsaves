@@ -50,6 +50,12 @@ typedef struct {
     char name[256];     // the folder's own name, e.g. "0x12345 Pokemon Y"
     char fullPath[512]; // sdmc:/... path to that folder
     u32 uniqueId;       // parsed from the "0x%05X " prefix, 0 if unparseable
+    // main.c sets this true for the one synthetic entry it prepends when
+    // saves_detect_ds_card() finds a cartridge in the slot right now --
+    // checkpoint_list_title_folders() never sets it (always false on
+    // every real folder it returns), it's just a hint for the label
+    // callback to say "(cartridge in slot)" on that one entry.
+    bool isInsertedCartridge;
 } CheckpointTitleFolder;
 
 // Lists every top-level folder directly under CHECKPOINT_SAVES_DIR --

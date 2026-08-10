@@ -104,31 +104,32 @@ void ui_toggle_email_visibility(void);
 bool ui_is_email_hidden(void);
 
 // Interactive icon grid: the top screen's main "home" page once logged
-// in. Tile 0 is always a reserved "import from folder" tile and tile 1 a
-// reserved "browse Checkpoint's own saves folder" tile (both drawn from
-// the same loaded folder icon texture, told apart only by their caption);
-// tiles 2..N+1 are whatever ui_set_home_icons() last built, in the same
-// order. get_label(i, userdata) (optional; same contract as
-// ui_run_menu()'s, but index 0/1 mean the two reserved tiles) supplies
-// the caption shown under the grid for whichever tile is currently
-// highlighted. The bottom screen shows a fixed set of control hints
-// (footer-anchored) for the whole time this runs -- there's nothing else
-// for it to show here.
+// in. Tiles 0/1/2 are always three reserved tiles -- "import from
+// folder", "browse Checkpoint's own saves folder", "browse every
+// installed app, unfiltered" (all three drawn from the same loaded
+// folder icon texture, told apart only by their caption); tiles 3..N+2
+// are whatever ui_set_home_icons() last built, in the same order.
+// get_label(i, userdata) (optional; same contract as ui_run_menu()'s, but
+// index 0/1/2 mean the three reserved tiles) supplies the caption shown
+// under the grid for whichever tile is currently highlighted. The bottom
+// screen shows a fixed set of control hints (footer-anchored) for the
+// whole time this runs -- there's nothing else for it to show here.
 //
 // Left/Right move the highlight and wrap around the whole grid; Up/Down
 // move a full row, and L/R move a full page (visible rows' worth) --
 // both clamp at the top/bottom instead of wrapping (see ui.c for why). A
 // confirms, returning the highlighted tile's index (0 = folder/import, 1
-// = browse Checkpoint, 2..N+1 = title index N-1). B returns
-// UI_GRID_CANCEL, START returns UI_GRID_EXIT, X returns UI_GRID_ACCOUNT
-// (there's a small person icon in the header as a visual reminder, but it
-// isn't independently selectable, just a hint that X does something
-// there), Y returns UI_GRID_BACKUP_ALL (back up every listed title's live
-// save in one go), SELECT returns UI_GRID_TOGGLE_EXTDATA (show only
-// titles with a backable extra-data save, or go back to showing all of
-// them -- main.c owns which titles that actually is, this just reports
-// the key press) -- main.c tells all of these apart from a real tile pick
-// since none of them are valid indices.
+// = browse Checkpoint, 2 = browse other apps, 3..N+2 = title index N-1).
+// B returns UI_GRID_CANCEL, START returns UI_GRID_EXIT, X returns
+// UI_GRID_ACCOUNT (there's a small person icon in the header as a visual
+// reminder, but it isn't independently selectable, just a hint that X
+// does something there), Y returns UI_GRID_BACKUP_ALL (back up every
+// listed title's live save in one go), SELECT returns
+// UI_GRID_TOGGLE_EXTDATA (show only titles with a backable extra-data
+// save, or go back to showing all of them -- main.c owns which titles
+// that actually is, this just reports the key press) -- main.c tells all
+// of these apart from a real tile pick since none of them are valid
+// indices.
 #define UI_GRID_CANCEL          (-1)
 #define UI_GRID_EXIT            (-2)
 #define UI_GRID_ACCOUNT         (-3)

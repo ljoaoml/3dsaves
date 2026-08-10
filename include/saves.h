@@ -2,6 +2,7 @@
 #include "title_name.h"
 #include <3ds.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef struct {
     u64 titleId;
@@ -44,6 +45,18 @@ typedef struct {
 // returned array.
 Result saves_list_titles(InstalledTitle **out, u32 *count);
 
+// Same as saves_list_titles(), but with neither of its two exclusions
+// applied: every application-category (0x00040000) title is included,
+// whether or not it's on the system-title exclusion list and whether or
+// not any save probe can reach it. A manual last-resort fallback ("Other
+// apps..." in main.c) for a title saves_list_titles() still doesn't show
+// for some reason its probes don't recognize -- expect this to include
+// plenty of built-in apps with no real save at all (Mii Maker, Face
+// Raiders, ...); attempting a backup on one of those just fails cleanly,
+// same as any other title this project can't read. Caller must free()
+// the returned array.
+Result saves_list_all_titles(InstalledTitle **out, u32 *count);
+
 // Backs up `title`'s save into a new zip at `zipPath` on SD: every file in
 // its SAVEDATA archive preserving the directory structure, or (when
 // title->isRawGbaSave) the one bare save file pulled out of a GBA Virtual
@@ -67,3 +80,16 @@ Result saves_backup_title_extdata(const InstalledTitle *title, const char *zipPa
 // backup), not still packed inside a title's own save archive. Returns 0
 // on success, -1 if sourceDir can't be opened.
 Result saves_backup_folder(const char *sourceDir, const char *zipPath);
+
+// Identifies a physical DS/DSi cartridge in the game card slot from its
+// ROM header alone -- no reads or writes of its save chip at all (see
+// saves.c for why: reading a DS cart's actual save needs a much riskier,
+// much larger SPI protocol implementation this project deliberately
+// doesn't have). Returns false if no card is inserted or it's a normal
+// 3DS card. On true, fills in `gameCode` (e.g. "IPKE") and `description`
+// (its ROM's own title), both NUL-terminated, matching exactly how
+// Checkpoint names this cart's own Checkpoint folder -- see
+// CHECKPOINT_SAVES_DIR in checkpoint_saves.h for the "0x%05X <name>"
+// convention normal titles use; a DS cart (no title id to build that
+// from) uses "<gameCode> <description>" instead.
+bool saves_detect_ds_card(char *gameCode, size_t gameCodeSize, char *description, size_t descSize);

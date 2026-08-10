@@ -340,12 +340,13 @@ static void draw_scroll_caret(float cy, bool pointsUp, u32 color) {
     }
 }
 
-// The icon grid itself: tile 0 is always the reserved folder/import tile,
-// tiles 1..s_grid.count-1 are title icons (see ui_set_home_icons()) --
-// this is the top screen's actual page content while ui_run_icon_grid()
-// is active, occupying most of the screen below draw_top_header(), not a
-// decorative strip. The highlighted tile gets a solid frame drawn behind
-// it (in COLOR_SELECT_BG, currently the same purple as everything else --
+// The icon grid itself: tiles 0/1/2 are always the three reserved
+// folder-style tiles, tiles 3..s_grid.count-1 are title icons (see
+// ui_set_home_icons()) -- this is the top screen's actual page content
+// while ui_run_icon_grid() is active, occupying most of the screen below
+// draw_top_header(), not a decorative strip. The highlighted tile gets a
+// solid frame drawn behind it (in COLOR_SELECT_BG, currently the same
+// purple as everything else --
 // see ui_init()) before the icon itself, and the highlighted item's own
 // name is captioned below the grid via s_grid.getLabel().
 static void draw_icon_grid(void) {
@@ -364,12 +365,12 @@ static void draw_icon_grid(void) {
             C2D_DrawRectSolid(x - 4.0f, y - 4.0f, 0.0f, ICON_TILE_SIZE + 8.0f, ICON_TILE_SIZE + 8.0f, COLOR_SELECT_BG);
         }
 
-        if (i == 0 || i == 1) {
-            // Tile 0 (import) and tile 1 (browse Checkpoint's own saves
-            // folder -- see UI_GRID_CHECKPOINT) share the one folder-icon
-            // asset there is; the caption below tells them apart, same as
-            // every other tile relies on getLabel() rather than a unique
-            // icon per entry.
+        if (i == 0 || i == 1 || i == 2) {
+            // Tile 0 (import), tile 1 (browse Checkpoint's own saves
+            // folder) and tile 2 (browse every installed app, unfiltered)
+            // share the one folder-icon asset there is; the caption below
+            // tells them apart, same as every other tile relies on
+            // getLabel() rather than a unique icon per entry.
             if (s_folderIconLoaded) {
                 C2D_DrawImageAt(s_folderIcon, x, y, 0.0f, NULL,
                                  ICON_TILE_SIZE / s_folderIcon.subtex->width,
@@ -380,7 +381,7 @@ static void draw_icon_grid(void) {
             continue;
         }
 
-        int titleIdx = i - 2;
+        int titleIdx = i - 3;
         if (titleIdx < s_titleIconCount && s_titleIconValid[titleIdx]) {
             C2D_Image img = { &s_titleIconTex[titleIdx], &s_titleIconSubtex };
             C2D_DrawImageAt(img, x, y, 0.0f, NULL, ICON_TILE_SIZE / 48.0f, ICON_TILE_SIZE / 48.0f);
@@ -736,7 +737,7 @@ bool ui_confirm(const char *prompt) {
 }
 
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
-    s_grid.count = 2 + s_titleIconCount; // tile 0 = import, tile 1 = browse Checkpoint
+    s_grid.count = 3 + s_titleIconCount; // tile 0 = import, tile 1 = Checkpoint, tile 2 = other apps
     s_grid.cols = grid_cols();
     if (s_grid.selected >= s_grid.count) s_grid.selected = 0;
     s_grid.scrollRow = 0;

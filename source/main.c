@@ -104,9 +104,9 @@ static const char *title_display_name(const InstalledTitle *t) {
     return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
 }
 
-// ui_run_icon_grid()'s caption callback: index 0/1 are its two reserved
-// tiles, 2..N+1 line up with title_icon_pixels() below (same
-// state->visible indexing, offset by 2 instead of 1). The physical game
+// ui_run_icon_grid()'s caption callback: index 0/1/2 are its three
+// reserved tiles, 3..N+2 line up with title_icon_pixels() below (same
+// state->visible indexing, offset by 3 instead of 1). The physical game
 // card slot can only ever hold one title at a time and is easy to mix up
 // with an SD-installed game sharing a similar name, so it's flagged in
 // the caption -- display-only (a static scratch buffer, safe since only
@@ -117,8 +117,9 @@ static const char *grid_label(int index, void *userdata) {
     const MenuState *state = (const MenuState *)userdata;
     if (index == 0) return "Import from SD/3DS folder";
     if (index == 1) return "Checkpoint";
+    if (index == 2) return "Other apps...";
 
-    const InstalledTitle *t = &state->titles[state->visible[index - 2]];
+    const InstalledTitle *t = &state->titles[state->visible[index - 3]];
     const char *name = title_display_name(t);
     if (t->mediaType != MEDIATYPE_GAME_CARD) return name;
 
@@ -647,7 +648,12 @@ static void import_and_upload(DropboxTokens *tokens) {
 
 static const char *checkpoint_folder_menu_label(int index, void *userdata) {
     const CheckpointTitleFolder *folders = (const CheckpointTitleFolder *)userdata;
-    return display_name_for_folder(folders[index].fullPath);
+    const char *base = display_name_for_folder(folders[index].fullPath);
+    if (!folders[index].isInsertedCartridge) return base;
+
+    static char labelBuf[300];
+    snprintf(labelBuf, sizeof(labelBuf), "%s (cartridge in slot)", base);
+    return labelBuf;
 }
 
 static const char *checkpoint_instance_menu_label(int index, void *userdata) {
@@ -687,7 +693,7 @@ static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *token
 
     if (count == 0) {
         ui_clear();
-        ui_print_error("\nNo backup instances found in this folder.\n");
+        ui_print_error("\nNo backup instances found here yet -- use Checkpoint to create one first.\n");
         ui_wait_for_a();
         return;
     }
@@ -740,19 +746,37 @@ static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *token
 // some reason, is still reachable here since it only reads the SD card's
 // folder structure directly (checkpoint_list_title_folders()), the same
 // way Checkpoint itself would show it.
+//
+// If a physical DS/DSi cartridge is sitting in the game card slot right
+// now (saves_detect_ds_card()), its Checkpoint folder is prepended as one
+// more entry -- named/pathed exactly the way Checkpoint itself would, so
+// picking it works whether or not a backup already exists there. This
+// project deliberately never reads the cart's own save chip (see
+// saves_detect_ds_card()'s doc comment for why): the actual backup still
+// has to happen in Checkpoint, same as every other case this app hands
+// off there. Detecting it costs one ROM header read, done fresh every
+// time this opens so a cart swapped in after launch is picked up too.
 static void show_checkpoint_browser(MenuState *state, DropboxTokens *tokens) {
-    static CheckpointTitleFolder folders[MAX_CHECKPOINT_TITLE_FOLDERS];
+    static CheckpointTitleFolder folders[MAX_CHECKPOINT_TITLE_FOLDERS + 1];
     int count = 0;
-    if (!checkpoint_list_title_folders(folders, MAX_CHECKPOINT_TITLE_FOLDERS, &count)) {
+
+    char cardGameCode[8], cardDescription[64];
+    if (saves_detect_ds_card(cardGameCode, sizeof(cardGameCode), cardDescription, sizeof(cardDescription))) {
+        CheckpointTitleFolder *f = &folders[count++];
+        snprintf(f->name, sizeof(f->name), "%s %s", cardGameCode, cardDescription);
+        snprintf(f->fullPath, sizeof(f->fullPath), "%s/%s %s", CHECKPOINT_SAVES_DIR, cardGameCode, cardDescription);
+        f->uniqueId = 0;
+        f->isInsertedCartridge = true;
+    }
+
+    int scanned = 0;
+    checkpoint_list_title_folders(folders + count, MAX_CHECKPOINT_TITLE_FOLDERS, &scanned);
+    count += scanned;
+
+    if (count == 0) {
         ui_clear();
         ui_print_error("\nCheckpoint's saves folder wasn't found -- "
                         "Checkpoint has never backed anything up on this SD card yet.\n");
-        ui_wait_for_a();
-        return;
-    }
-    if (count == 0) {
-        ui_clear();
-        ui_print_error("\nCheckpoint's saves folder is empty.\n");
         ui_wait_for_a();
         return;
     }
@@ -763,6 +787,83 @@ static void show_checkpoint_browser(MenuState *state, DropboxTokens *tokens) {
 
         show_checkpoint_folder_detail(state, tokens, &folders[choice]);
     }
+}
+
+// Tile 2 on the icon grid: a manual fallback for a title
+// saves_list_titles()'s automatic filtering still doesn't show for some
+// reason -- lists literally every application-category title installed,
+// unfiltered (saves_list_all_titles()), and lets the user try backing up
+// any of them directly. Expected to include plenty of built-in apps with
+// no real save data (Mii Maker, Face Raiders, ...) -- picking one of
+// those just fails cleanly with a clear error, same as any other title
+// whose save this app can't read.
+static const char *other_title_menu_label(int index, void *userdata) {
+    const InstalledTitle *titles = (const InstalledTitle *)userdata;
+    return title_display_name(&titles[index]);
+}
+
+static void show_other_apps_picker(DropboxTokens *tokens) {
+    InstalledTitle *titles = NULL;
+    u32 count = 0;
+    Result rc = saves_list_all_titles(&titles, &count);
+    if (R_FAILED(rc) || count == 0) {
+        ui_clear();
+        ui_print_error("\nNo installed apps found.\n");
+        ui_wait_for_a();
+        if (titles) free(titles);
+        return;
+    }
+
+    for (;;) {
+        int choice = ui_run_menu("Other apps", (int)count, other_title_menu_label, titles);
+        if (choice < 0) break; // B: back to the home screen
+
+        InstalledTitle *t = &titles[choice];
+        const char *gameName = title_display_name(t);
+
+        ui_clear();
+        ui_printf("Backing up %s...\n", gameName);
+        ui_flush();
+
+        Result backupRc = saves_backup_title(t, TMP_ZIP_PATH);
+        if (R_FAILED(backupRc)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "\nCould not read this app's save data (0x%08lX).\n", (unsigned long)backupRc);
+            ui_print_error(msg);
+            ui_wait_for_a();
+            continue;
+        }
+
+        ui_print("Save extracted. Uploading to Dropbox...\n");
+        ui_flush();
+
+        char timestamp[64];
+        time_t now = time(NULL);
+        struct tm *tmNow = localtime(&now);
+        if (tmNow) strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tmNow);
+        else snprintf(timestamp, sizeof(timestamp), "backup");
+
+        char dropboxPath[192];
+        dropbox_build_backup_path(gameName, timestamp, dropboxPath, sizeof(dropboxPath));
+
+        char error[256];
+        bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+        remove(TMP_ZIP_PATH);
+
+        if (ok) {
+            mark_backed_up(t->titleId);
+            char msg[224];
+            snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
+            ui_print_success(msg);
+        } else {
+            char msg[288];
+            snprintf(msg, sizeof(msg), "\nUpload failed: %s\n", error);
+            ui_print_error(msg);
+        }
+        ui_wait_for_a();
+    }
+
+    free(titles);
 }
 
 // Temporary diagnostic: confirm on real hardware that the mbedTLS-over-
@@ -932,11 +1033,17 @@ int main(void) {
                 continue;
             }
 
-            // choice is an index into state.visible (2..visibleCount+1),
+            if (choice == 2) {
+                show_other_apps_picker(&tokens);
+                refresh_visible(&state);
+                continue;
+            }
+
+            // choice is an index into state.visible (3..visibleCount+2),
             // not state.titles directly -- state.visible[] is what maps
             // back to a real title when the extdata filter (SELECT) has
-            // hidden some, offset by 2 for the two reserved tiles above.
-            int titleIndex = (int)state.visible[choice - 2];
+            // hidden some, offset by 3 for the three reserved tiles above.
+            int titleIndex = (int)state.visible[choice - 3];
             show_game_detail(&state, &tokens, titleIndex);
             // Picks up newly-created Checkpoint backups and any title
             // list changes (cart swap, freshly installed game) each time
