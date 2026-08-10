@@ -242,11 +242,19 @@ void ui_set_account_email(const char *email) {
     else s_accountEmail[0] = '\0';
 }
 
+// Privacy toggle for the header's email (see show_account_menu() in
+// main.c) -- purely a display concern, doesn't touch s_accountEmail
+// itself, so toggling it back shows the real address again with no
+// re-fetch needed.
+static bool s_emailHidden = false;
+void ui_toggle_email_visibility(void) { s_emailHidden = !s_emailHidden; }
+bool ui_is_email_hidden(void) { return s_emailHidden; }
+
 // No asset for this (unlike the background/folder icon) -- a plain
 // circle head + trapezoid shoulders, just enough to read as "account"
 // at header size. Purely a visual affordance; X (see ui_run_icon_grid())
-// opens the actual logout confirmation from anywhere, not just by
-// "pressing" this icon (there's no touch input in this app at all).
+// opens the account management menu from anywhere, not by "pressing"
+// this icon (there's no touch input in this app at all).
 static void draw_person_icon(float cx, float cy, float scale, u32 color) {
     C2D_DrawCircleSolid(cx, cy - 3.5f * scale, 0.0f, 2.6f * scale, color);
     C2D_DrawTriangle(cx - 4.5f * scale, cy + 5.0f * scale, color,
@@ -258,19 +266,25 @@ static void draw_person_icon(float cx, float cy, float scale, u32 color) {
 }
 
 // "KONNECT3DS" at the left, the logged-in account's email at the right
-// (blank if logged out, or before ui_set_account_email() has been told
-// otherwise) next to a small person icon (X opens account/logout -- see
+// (or "•••••• (oculto)" if ui_toggle_email_visibility() hid it; blank if
+// logged out, or before ui_set_account_email() has been told otherwise)
+// next to a small person icon (X opens the account menu -- see
 // ui_run_icon_grid()), a rule underneath -- the top screen's persistent
 // header while the icon grid is showing.
 static void draw_top_header(void) {
     draw_text(MARGIN_X, 6.0f, HEADER_TEXT_SCALE, COLOR_ACCENT, "KONNECT3DS", true);
-    // The person icon (X = account/logout) only makes sense once there's
-    // an account linked -- s_accountEmail is empty until then, so it
-    // doubles as the "are we logged in" signal here rather than adding a
-    // separate bool the two call sites would have to keep in sync.
+    // The person icon (X = account menu) only makes sense once there's an
+    // account linked -- s_accountEmail is empty until then, so it doubles
+    // as the "are we logged in" signal here rather than adding a separate
+    // bool the two call sites would have to keep in sync.
     if (s_accountEmail[0]) {
         draw_person_icon(TOP_W - MARGIN_X - 8.0f, 15.0f, 1.3f, COLOR_ACCENT);
-        draw_text_aligned(TOP_W - MARGIN_X - 24.0f, 8.0f, TEXT_SCALE, COLOR_ACCENT, s_accountEmail, true, C2D_AlignRight);
+        // Plain ASCII, not a bullet/dot glyph -- the system font this app
+        // uses elsewhere has no real Unicode coverage (see
+        // title_name.c's utf16_field_to_ascii()), so anything fancier
+        // risks a missing-glyph box instead of an actual mask.
+        const char *shown = s_emailHidden ? "****** (email oculto)" : s_accountEmail;
+        draw_text_aligned(TOP_W - MARGIN_X - 24.0f, 8.0f, TEXT_SCALE, COLOR_ACCENT, shown, true, C2D_AlignRight);
     }
     C2D_DrawRectSolid(MARGIN_X, HEADER_BAR_HEIGHT - 4.0f, 0.0f, TOP_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
 }
@@ -532,6 +546,22 @@ static void draw_confirm(void) {
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A = yes    B = no", false);
 }
 
+#define GRID_FOOTER_LINES 5
+
+// The icon grid's bottom screen: fixed control hints, anchored to the
+// bottom of the screen (a footer) rather than the top -- there's nothing
+// else to show there while the grid is up, so this bypasses the generic
+// top-anchored scrolling log entirely instead of stretching it to fake a
+// footer.
+static void draw_grid_bottom_footer(void) {
+    float y = BOTTOM_H - MARGIN_Y - GRID_FOOTER_LINES * LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Direcional: navegar", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "L / R: pular de pagina", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A: abrir", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "X: gerenciar conta", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "START: sair do app", false);
+}
+
 static void present(ui_top_draw_fn drawTop, void *topUserdata) {
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     // Cleared once for the whole frame, not per line -- see
@@ -557,7 +587,10 @@ static void present(ui_top_draw_fn drawTop, void *topUserdata) {
     switch (s_bottomMode) {
         case BOTTOM_MENU:    draw_menu(); break;
         case BOTTOM_CONFIRM: draw_confirm(); break;
-        default:              draw_log(s_bottomLines, s_bottomCount, BOTTOM_W, MARGIN_Y); break;
+        default:
+            if (s_topMode == TOP_GRID) draw_grid_bottom_footer();
+            else draw_log(s_bottomLines, s_bottomCount, BOTTOM_W, MARGIN_Y);
+            break;
     }
 
     C3D_FrameEnd(0);
@@ -665,18 +698,7 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
     s_grid.getLabel = get_label;
     s_grid.userdata = userdata;
     s_topMode = TOP_GRID;
-
-    // The bottom screen has nothing else to show while the grid runs (see
-    // ui_run_icon_grid()'s doc comment) -- put the controls here instead
-    // of leaving it blank. Plain BOTTOM_LOG content, so this needs no new
-    // rendering path of its own.
-    ui_clear_bottom();
-    ui_print_header_bottom("Controles");
-    ui_print_bottom("Direcional: navegar\n");
-    ui_print_bottom("L / R: pular de pagina\n");
-    ui_print_bottom("A: abrir\n");
-    ui_print_bottom("X: conta (logout)\n");
-    ui_print_bottom("START: sair do app\n");
+    s_bottomMode = BOTTOM_LOG; // draw_grid_bottom_footer() takes over from here (see present())
 
     int visibleRows = grid_visible_rows();
     int result;
@@ -724,7 +746,7 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
             } else if (kDown & KEY_A) { result = s_grid.selected; goto done; }
             else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
             else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
-            else if (kDown & (KEY_X | KEY_SELECT)) { result = UI_GRID_LOGOUT; goto done; }
+            else if (kDown & (KEY_X | KEY_SELECT)) { result = UI_GRID_ACCOUNT; goto done; }
             else gspWaitForVBlank();
         }
     }

@@ -64,6 +64,39 @@ static void refresh_account_email(DropboxTokens *tokens) {
     ui_set_account_email(ok ? email : NULL);
 }
 
+static const char *account_menu_label(int index, void *userdata) {
+    (void)userdata;
+    if (index == 0) return ui_is_email_hidden() ? "Mostrar email no header" : "Ocultar email no header";
+    if (index == 1) return "Sair da conta (logout)";
+    return "?";
+}
+
+// X on the icon grid opens this (see ui_run_icon_grid()'s UI_GRID_ACCOUNT)
+// instead of logging out directly -- room to grow (this is where any
+// future account-level setting belongs) and a deliberate extra step
+// before something as disruptive as logging out. Loops so toggling the
+// email visibility doesn't immediately kick back out to the grid.
+static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
+    for (;;) {
+        int choice = ui_run_menu("Gerenciar conta", 2, account_menu_label, NULL);
+        if (choice < 0) return; // B: back to the grid, nothing changed
+
+        if (choice == 0) {
+            ui_toggle_email_visibility();
+            continue;
+        }
+
+        // choice == 1: log out
+        if (ui_confirm("Sair da conta do Dropbox?")) {
+            auth_delete_tokens();
+            memset(tokens, 0, sizeof(*tokens));
+            state->loggedIn = false;
+            ui_set_account_email(NULL);
+        }
+        return;
+    }
+}
+
 // One entry in show_game_detail()'s local-backup picker: either the
 // title's own live save data, or one of Checkpoint's own backup instances
 // for it (see checkpoint_saves.h).
@@ -376,9 +409,9 @@ int main(void) {
     bool firstRun = true;
 
     // Outer loop: the login gate on one side, the icon-grid home screen on
-    // the other. Logging out (SELECT on the grid) drops back to the top of
-    // this loop instead of returning from main() -- there's nothing useful
-    // to show once logged out except the login gate itself.
+    // the other. Logging out (X on the grid -> show_account_menu()) drops
+    // back to the top of this loop instead of returning from main() --
+    // there's nothing useful to show once logged out except the login gate.
     while (!wantExit) {
         while (!state.loggedIn) {
             if (!ui_run_login_gate()) { wantExit = true; break; }
@@ -405,14 +438,9 @@ int main(void) {
             if (choice == UI_GRID_EXIT) { wantExit = true; break; }
             if (choice == UI_GRID_CANCEL) continue; // B: no-op at the home screen
 
-            if (choice == UI_GRID_LOGOUT) {
-                if (ui_confirm("Log out of Dropbox?")) {
-                    auth_delete_tokens();
-                    memset(&tokens, 0, sizeof(tokens));
-                    state.loggedIn = false;
-                    ui_set_account_email(NULL);
-                    break; // back to the outer loop's login gate
-                }
+            if (choice == UI_GRID_ACCOUNT) {
+                show_account_menu(&state, &tokens);
+                if (!state.loggedIn) break; // logged out: back to the outer loop's login gate
                 continue;
             }
 

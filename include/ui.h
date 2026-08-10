@@ -87,27 +87,36 @@ void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata);
 // grid's header bar. NULL or "" clears it (shown logged-out/unknown).
 void ui_set_account_email(const char *email);
 
+// Privacy toggle for the header's email display (main.c's account menu
+// offers this as "hide/show email") -- purely cosmetic, doesn't affect
+// what ui_set_account_email() has stored, so toggling back shows the real
+// address again immediately.
+void ui_toggle_email_visibility(void);
+bool ui_is_email_hidden(void);
+
 // Interactive icon grid: the top screen's main "home" page once logged
 // in. Tile 0 is always a reserved "import from folder" tile (drawn from
 // the loaded folder icon texture); tiles 1..N are whatever
 // ui_set_home_icons() last built, in the same order. get_label(i,
 // userdata) (optional; same contract as ui_run_menu()'s, but index 0
 // means the folder tile) supplies the caption shown under the grid for
-// whichever tile is currently highlighted.
+// whichever tile is currently highlighted. The bottom screen shows a
+// fixed set of control hints (footer-anchored) for the whole time this
+// runs -- there's nothing else for it to show here.
 //
 // Left/Right move the highlight and wrap around the whole grid; Up/Down
 // move a full row, and L/R move a full page (visible rows' worth) --
 // both clamp at the top/bottom instead of wrapping (see ui.c for why). A
 // confirms, returning the highlighted tile's index (0 = folder/import,
 // 1..N = title index N-1). B returns UI_GRID_CANCEL, START returns
-// UI_GRID_EXIT, X or SELECT returns UI_GRID_LOGOUT (X is the primary
-// account/logout button -- there's a small person icon in the header as
-// a visual reminder, but it isn't independently selectable, just a hint
+// UI_GRID_EXIT, X or SELECT returns UI_GRID_ACCOUNT (X is the primary
+// account-menu button -- there's a small person icon in the header as a
+// visual reminder, but it isn't independently selectable, just a hint
 // that X does something there; SELECT still works too) -- main.c tells
 // these apart from a real tile pick since none of them are valid indices.
-#define UI_GRID_CANCEL (-1)
-#define UI_GRID_EXIT   (-2)
-#define UI_GRID_LOGOUT (-3)
+#define UI_GRID_CANCEL  (-1)
+#define UI_GRID_EXIT    (-2)
+#define UI_GRID_ACCOUNT (-3)
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata);
 
 // Big centered "Log in to Dropbox" prompt, shown before the icon grid the
