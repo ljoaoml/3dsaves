@@ -20,6 +20,83 @@ static bool is_application_title(u64 titleId) {
     return ((titleId >> 32) & 0xFFFFFFFFULL) == TITLE_CATEGORY_APPLICATION;
 }
 
+// A handful of built-in system titles share the 0x00040000 application
+// category with real games but obviously aren't games -- ported verbatim
+// from Checkpoint's TitleQuirks::isSystemExcluded() (3ds/source/
+// titlequirks.cpp), the exact IDs it excludes across every region variant
+// of the Instruction Manual and Internet Browser, plus one title it
+// documents only as "Garbage". Region-specific low IDs don't follow any
+// derivable pattern, so this is a lookup table, not a formula, same as
+// upstream.
+static bool is_system_excluded(u64 titleId) {
+    switch ((u32)titleId) {
+        case 0x00008602: case 0x00009202: case 0x00009B02: // Instruction Manual
+        case 0x0000A402: case 0x0000AC02: case 0x0000B402:
+        case 0x00008802: case 0x00009402: case 0x00009D02: // Internet Browser
+        case 0x0000A602: case 0x0000AE02: case 0x0000B602:
+        case 0x20008802: case 0x20009402: case 0x20009D02:
+        case 0x2000AE02:
+        case 0x00021A00: // "Garbage" (Checkpoint's own label for this one)
+            return true;
+        default:
+            break;
+    }
+    if ((titleId >> 32) == 0x0004000EULL) return true;  // title updates
+    if ((titleId >> 32) == 0x0004800FULL) return true;  // DSi non-executable data archives
+    return false;
+}
+
+static Result open_title_save_archive(const InstalledTitle *title, FS_Archive *archive);
+
+// Cheap accessibility probe: open the archive, then immediately close it
+// without reading anything -- matches Checkpoint's SaveDataSource::
+// accessible() for the CtrSave/Extdata cases (a raw GBA VC save or a TWL
+// title needs more than this, but neither applies to SD/cartridge CTR
+// titles, the only kind this project lists).
+static bool savedata_accessible(const InstalledTitle *title) {
+    FS_Archive archive;
+    Result rc = open_title_save_archive(title, &archive);
+    if (R_FAILED(rc)) return false;
+    FSUSER_CloseArchive(archive);
+    return true;
+}
+
+// Most titles' extdata archive ID is just their own unique ID (the same
+// value Checkpoint's own paths.cpp uses for the "0x%05X " Checkpoint
+// folder prefix -- see checkpoint_saves.c), but a handful of specific
+// titles' extdata lives under a different ID that doesn't follow that
+// pattern at all. Ported verbatim from Checkpoint's TitleQuirks::
+// extdataIdFor() (3ds/source/titlequirks.cpp); matches on the *whole* low
+// 32 bits of the title ID, not just the unique-ID portion, same as
+// upstream.
+static u32 extdata_id_for(u64 titleId) {
+    u32 low = (u32)titleId;
+    switch (low) {
+        case 0x00055E00: return 0x055D; // Pokémon Y
+        case 0x0011C400: return 0x11C5; // Pokémon Omega Ruby
+        case 0x00175E00: return 0x1648; // Pokémon Moon
+        case 0x00179600: case 0x00179800: return 0x1794; // Fire Emblem Conquest SE NA
+        case 0x00179700: case 0x0017A800: return 0x1795; // Fire Emblem Conquest SE EU
+        case 0x0012DD00: case 0x0012DE00: return 0x12DC; // Fire Emblem If JP
+        case 0x001B5100: return 0x1B50; // Pokémon Ultramoon
+        default: return low >> 8;
+    }
+}
+
+static Result open_extdata_archive(u32 extdataId, FS_Archive *archive) {
+    u32 path[3] = { (u32)MEDIATYPE_SD, extdataId, 0 };
+    FS_Path binPath = { PATH_BINARY, sizeof(path), path };
+    return FSUSER_OpenArchive(archive, ARCHIVE_EXTDATA, binPath);
+}
+
+static bool extdata_accessible(u64 titleId) {
+    FS_Archive archive;
+    Result rc = open_extdata_archive(extdata_id_for(titleId), &archive);
+    if (R_FAILED(rc)) return false;
+    FSUSER_CloseArchive(archive);
+    return true;
+}
+
 static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr,
                                      u32 *count, u32 *capacity) {
     u32 total = 0;
@@ -35,6 +112,16 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
 
     for (u32 i = 0; i < read; i++) {
         if (!is_application_title(ids[i])) continue;
+        if (is_system_excluded(ids[i])) continue;
+
+        InstalledTitle candidate;
+        candidate.titleId = ids[i];
+        candidate.mediaType = mediatype;
+        // savedata_accessible() only needs titleId/mediaType, filled in
+        // above; probe before growing the array or touching the SMDH so a
+        // title that fails the probe costs nothing more than opening and
+        // immediately closing its archive.
+        if (!savedata_accessible(&candidate)) continue;
 
         if (*count == *capacity) {
             u32 newCapacity = (*capacity == 0) ? 16 : (*capacity * 2);
@@ -53,6 +140,7 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         // title has no readable SMDH, callers fall back to showing the
         // product code / a plain placeholder instead.
         title_get_info(ids[i], mediatype, t->name, sizeof(t->name), t->icon);
+        t->extdataAccessible = extdata_accessible(ids[i]);
         (*count)++;
     }
 
@@ -160,6 +248,24 @@ static Result walk_and_zip(FS_Archive archive, const char *fsDir, const char *zi
 Result saves_backup_title(const InstalledTitle *title, const char *zipPath) {
     FS_Archive archive;
     Result rc = open_title_save_archive(title, &archive);
+    if (R_FAILED(rc)) return rc;
+
+    ZipWriter *zw = zipw_open(zipPath);
+    if (!zw) {
+        FSUSER_CloseArchive(archive);
+        return -1;
+    }
+
+    walk_and_zip(archive, "/", "", zw, 0);
+
+    zipw_close(zw);
+    FSUSER_CloseArchive(archive);
+    return 0;
+}
+
+Result saves_backup_title_extdata(const InstalledTitle *title, const char *zipPath) {
+    FS_Archive archive;
+    Result rc = open_extdata_archive(extdata_id_for(title->titleId), &archive);
     if (R_FAILED(rc)) return rc;
 
     ZipWriter *zw = zipw_open(zipPath);

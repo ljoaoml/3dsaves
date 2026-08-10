@@ -800,28 +800,6 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     return 0;
 }
 
-// One numbered log file per app launch (http_debug_1.log, _2.log, ...),
-// tracked via a small counter file so a fresh test run always gets a new
-// file without having to manually delete the old one first. Overwritten
-// on every request *within* that file, not appended -- the login screen
-// polls the relay every ~2s while waiting, so a new file (or appending)
-// per request would flood the SD card with dozens of near-identical
-// files during a single wait. Only the most recent request in the
-// current run is available this way, but that's normally exactly the
-// one that just failed.
-static int next_log_number(void) {
-    int n = 0;
-    FILE *f = fopen("sdmc:/3ds/Konnect3DS/http_debug_seq.txt", "rb");
-    if (f) {
-        if (fscanf(f, "%d", &n) != 1) n = 0;
-        fclose(f);
-    }
-    n++;
-    f = fopen("sdmc:/3ds/Konnect3DS/http_debug_seq.txt", "wb");
-    if (f) { fprintf(f, "%d", n); fclose(f); }
-    return n;
-}
-
 // A stray control byte (NUL, or anything else below 0x20 other than the
 // \r\n line endings themselves) inside the header block turns an
 // otherwise well-formed-looking request into something a strict server
@@ -857,11 +835,20 @@ static long find_bad_header_byte(const HttpBuffer *req) {
 // SD card, so this doesn't add a new exposure -- just keep in mind this
 // file contains the same secrets before handing the SD card to anyone.
 static void write_debug_log(const char *url, Result rc, const HttpResponse *out) {
-    static int s_logNumber = -1;
-    if (s_logNumber < 0) s_logNumber = next_log_number();
+    // Only worth a write when something's actually wrong -- a plain
+    // R_FAILED(rc) check alone would miss exactly the class of bug this
+    // log was built to catch (a *successful* request that got back an
+    // unwanted status -- e.g. Cloudflare's raw 400s, see the git history),
+    // so any non-2xx status counts as "wrong" too, not just a transport
+    // failure. One fixed filename (not a new numbered file per launch --
+    // that accumulated forever and was never cleaned up) that only gets
+    // (re)written on an actual problem: if it's not there, nothing's wrong;
+    // if it is, it's always about the most recent problem, not stale.
+    bool failed = R_FAILED(rc);
+    bool badStatus = out && (out->status_code < 200 || out->status_code >= 300);
+    if (!failed && !badStatus) return;
 
-    char path[64];
-    snprintf(path, sizeof(path), "sdmc:/3ds/Konnect3DS/http_debug_%d.log", s_logNumber);
+    const char *path = "sdmc:/3ds/Konnect3DS/http_debug.log";
     FILE *f = fopen(path, "wb");
     if (!f) return;
 

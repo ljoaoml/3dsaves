@@ -5,6 +5,7 @@
 #include "saves.h"
 #include "sd_browse.h"
 #include "checkpoint_saves.h"
+#include "minizip_reader.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -103,12 +104,28 @@ static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
 typedef struct {
     char label[256];
     bool isLive;
+    bool isExtdata; // only meaningful when isLive: extdata instead of the main save
     const CheckpointBackup *checkpoint; // NULL when isLive
 } LocalBackupEntry;
 
-static const char *local_backup_label(int index, void *userdata) {
-    const LocalBackupEntry *entries = (const LocalBackupEntry *)userdata;
-    return entries[index].label;
+// show_game_detail()'s bottom-screen picker has one more option than
+// LocalBackupEntry entries: a reserved trailing "download from Dropbox"
+// item (index == entryCount) that doesn't back up anything, so its label
+// callback needs entryCount alongside the entries themselves.
+typedef struct {
+    const LocalBackupEntry *entries;
+    int entryCount;
+} GameDetailMenu;
+
+static const char *game_detail_label(int index, void *userdata) {
+    const GameDetailMenu *menu = (const GameDetailMenu *)userdata;
+    if (index == menu->entryCount) return "Download a backup from Dropbox...";
+    return menu->entries[index].label;
+}
+
+static const char *dropbox_entry_label(int index, void *userdata) {
+    const DropboxBackupEntry *entries = (const DropboxBackupEntry *)userdata;
+    return entries[index].name;
 }
 
 // Prints the game's header plus whatever's already uploaded to its Dropbox
@@ -160,11 +177,18 @@ static void upload_local_backup(MenuState *state, DropboxTokens *tokens, int tit
     char label[256];
     Result rc;
     if (entry->isLive) {
+        char timestamp[64];
         time_t now = time(NULL);
         struct tm *tmNow = localtime(&now);
-        if (tmNow) strftime(label, sizeof(label), "%Y%m%d-%H%M%S", tmNow);
-        else snprintf(label, sizeof(label), "backup");
-        rc = saves_backup_title(t, TMP_ZIP_PATH);
+        if (tmNow) strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tmNow);
+        else snprintf(timestamp, sizeof(timestamp), "backup");
+        if (entry->isExtdata) {
+            snprintf(label, sizeof(label), "extdata-%s", timestamp);
+            rc = saves_backup_title_extdata(t, TMP_ZIP_PATH);
+        } else {
+            snprintf(label, sizeof(label), "%s", timestamp);
+            rc = saves_backup_title(t, TMP_ZIP_PATH);
+        }
     } else {
         snprintf(label, sizeof(label), "%s", entry->checkpoint->name);
         rc = saves_backup_folder(entry->checkpoint->fullPath, TMP_ZIP_PATH);
@@ -201,14 +225,112 @@ static void upload_local_backup(MenuState *state, DropboxTokens *tokens, int tit
     ui_wait_for_a();
 }
 
+// Downloads one of the game's Dropbox backups and extracts it into a new
+// Checkpoint-style backup-instance folder under CHECKPOINT_SAVES_DIR --
+// "0x%05X <game name>/<label>", the exact layout checkpoint_saves.c reads
+// (find_title_folder() matches the "0x%05X " prefix, checkpoint_list_
+// backups() lists whatever subfolders sit under it). This app doesn't
+// write the save back into the title's live SAVEDATA archive itself: the
+// actual restore is one more step the user does inside Checkpoint, which
+// already has a trusted, well-tested restore flow -- this just gets the
+// backup onto the SD card where Checkpoint will find it.
+static void download_and_prepare_restore(MenuState *state, DropboxTokens *tokens, int titleIndex) {
+    InstalledTitle *t = &state->titles[titleIndex];
+    const char *gameName = title_display_name(t);
+
+    ui_clear();
+    ui_printf("Checking Dropbox backups for %s...\n", gameName);
+    ui_flush();
+
+    static DropboxBackupEntry dropboxEntries[MAX_DROPBOX_BACKUPS_SHOWN];
+    int count = 0;
+    char error[256];
+    if (!dropbox_list_backups(tokens, gameName, dropboxEntries, MAX_DROPBOX_BACKUPS_SHOWN, &count,
+                               error, sizeof(error))) {
+        char msg[288];
+        snprintf(msg, sizeof(msg), "\nCould not check Dropbox: %s\n", error);
+        ui_print_error(msg);
+        ui_wait_for_a();
+        return;
+    }
+    if (count == 0) {
+        ui_print_error("\nNo backups uploaded yet for this game.\n");
+        ui_wait_for_a();
+        return;
+    }
+
+    int choice = ui_run_menu("Choose a backup to download", count, dropbox_entry_label, dropboxEntries);
+    if (choice < 0) return; // B: cancel
+
+    char folder[192];
+    dropbox_build_game_folder(gameName, folder, sizeof(folder));
+    char dropboxPath[224];
+    snprintf(dropboxPath, sizeof(dropboxPath), "%s/%s", folder, dropboxEntries[choice].name);
+
+    ui_clear();
+    ui_printf("Downloading %s...\n", dropboxEntries[choice].name);
+    ui_flush();
+
+    bool ok = dropbox_download_file(tokens, dropboxPath, TMP_ZIP_PATH, error, sizeof(error));
+    if (!ok) {
+        char msg[288];
+        snprintf(msg, sizeof(msg), "\nDownload failed: %s\n", error);
+        ui_print_error(msg);
+        ui_wait_for_a();
+        return;
+    }
+
+    // The picked entry's own filename (already FAT/Dropbox-safe -- it was
+    // sanitized before upload) minus dropbox_build_backup_path()'s ".zip",
+    // reused as-is for the local backup-instance folder's name.
+    char label[192];
+    snprintf(label, sizeof(label), "%s", dropboxEntries[choice].name);
+    size_t labelLen = strlen(label);
+    if (labelLen > 4 && strcmp(label + labelLen - 4, ".zip") == 0) label[labelLen - 4] = '\0';
+
+    // "extdata-" is a prefix only this app's own upload_local_backup()
+    // ever adds (see its isExtdata branch) -- every backup this picker can
+    // possibly offer was uploaded by this same app, so it reliably tells
+    // an extdata backup apart from a save one, routing it into Checkpoint's
+    // separate extdata/ tree instead of mixing it into saves/ where
+    // Checkpoint would try to restore it as a SAVEDATA archive and fail.
+    bool isExtdata = strncmp(label, "extdata-", 8) == 0;
+    const char *destRoot = isExtdata ? CHECKPOINT_EXTDATA_DIR : CHECKPOINT_SAVES_DIR;
+
+    char safeGameName[128];
+    dropbox_sanitize_name(gameName, safeGameName, sizeof(safeGameName));
+
+    char destDir[512];
+    snprintf(destDir, sizeof(destDir), "%s/0x%05X %s/%s", destRoot,
+             (unsigned int)((u32)t->titleId >> 8), safeGameName, label);
+
+    ui_print("Extracting...\n");
+    ui_flush();
+
+    ok = zipr_extract_all(TMP_ZIP_PATH, destDir);
+    remove(TMP_ZIP_PATH);
+
+    if (ok) {
+        char msg[608];
+        snprintf(msg, sizeof(msg),
+                 "\nReady at:\n%s\n\nOpen Checkpoint and restore from this backup to finish.\n",
+                 destDir);
+        ui_print_success(msg);
+    } else {
+        ui_print_error("\nCould not read the downloaded backup (corrupt zip?).\n");
+    }
+    ui_wait_for_a();
+}
+
 // The per-game screen: top shows what's already backed up to Dropbox
 // (print_dropbox_backups()), bottom is a picker (ui_run_menu(), same
 // Up/Down/A/B as every other menu here) over the title's local backup
 // instances -- its own live save data plus any Checkpoint backups found
-// for it. Picking one uploads it and loops back (refreshing both the
-// Checkpoint scan and the Dropbox listing) instead of returning, so
-// several backups can be uploaded in one visit; B backs out to the title
-// list.
+// for it, plus a trailing "download from Dropbox" option. Picking a local
+// instance uploads it; picking the download option fetches and extracts
+// one instead. Either way this loops back (refreshing both the Checkpoint
+// scan and the Dropbox listing) instead of returning, so several backups
+// can be uploaded/downloaded in one visit; B backs out to the title list.
 static void show_game_detail(MenuState *state, DropboxTokens *tokens, int titleIndex) {
     InstalledTitle *t = &state->titles[titleIndex];
     const char *gameName = title_display_name(t);
@@ -223,21 +345,35 @@ static void show_game_detail(MenuState *state, DropboxTokens *tokens, int titleI
         int entryCount = 0;
         snprintf(entries[entryCount].label, sizeof(entries[entryCount].label), "Current save data (live)");
         entries[entryCount].isLive = true;
+        entries[entryCount].isExtdata = false;
         entries[entryCount].checkpoint = NULL;
         entryCount++;
+        if (t->extdataAccessible && entryCount < MAX_LOCAL_BACKUPS + 1) {
+            snprintf(entries[entryCount].label, sizeof(entries[entryCount].label), "Extra data (Pokedex/photos/etc.)");
+            entries[entryCount].isLive = true;
+            entries[entryCount].isExtdata = true;
+            entries[entryCount].checkpoint = NULL;
+            entryCount++;
+        }
         for (int i = 0; i < checkpointCount && entryCount < MAX_LOCAL_BACKUPS + 1; i++) {
             snprintf(entries[entryCount].label, sizeof(entries[entryCount].label), "%s", checkpointBackups[i].name);
             entries[entryCount].isLive = false;
+            entries[entryCount].isExtdata = false;
             entries[entryCount].checkpoint = &checkpointBackups[i];
             entryCount++;
         }
 
         print_dropbox_backups(tokens, gameName);
 
-        int choice = ui_run_menu(gameName, entryCount, local_backup_label, entries);
+        GameDetailMenu menu = { entries, entryCount };
+        int choice = ui_run_menu(gameName, entryCount + 1, game_detail_label, &menu);
         if (choice < 0) return; // B: back to the title list
 
-        upload_local_backup(state, tokens, titleIndex, &entries[choice]);
+        if (choice == entryCount) {
+            download_and_prepare_restore(state, tokens, titleIndex);
+        } else {
+            upload_local_backup(state, tokens, titleIndex, &entries[choice]);
+        }
     }
 }
 

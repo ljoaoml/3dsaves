@@ -3,6 +3,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// Strips characters forbidden in a Dropbox path component (which also
+// happen to be exactly the characters FAT/exFAT forbid in a filename --
+// Dropbox syncs to Windows clients, hence the overlap) plus trailing
+// spaces/periods, replacing each with '_'; falls back to "Unknown" if
+// that leaves nothing. Used both to build Dropbox paths below and, by
+// main.c, to turn a game's SMDH title into a safe local SD folder name
+// when preparing a downloaded backup for Checkpoint to restore.
+void dropbox_sanitize_name(const char *name, char *out, size_t outSize);
+
 // Uploads the local SD file at `localPath` to `dropboxPath` (e.g.
 // "/Konnect3DS/CTR-P-AREE.zip"), overwriting any existing file there.
 // On failure, writes a short human-readable reason into `errorOut`.
@@ -47,6 +56,13 @@ typedef struct {
 bool dropbox_list_backups(DropboxTokens *tokens, const char *gameName,
                            DropboxBackupEntry *out, int maxEntries, int *outCount,
                            char *errorOut, size_t errorOutSize);
+
+// Downloads the file at `dropboxPath` (e.g. one of dropbox_list_backups()'s
+// entries, joined onto dropbox_build_game_folder()) into a new local file
+// at `localPath`, overwriting it if it already exists. On failure, writes
+// a short human-readable reason into `errorOut`.
+bool dropbox_download_file(DropboxTokens *tokens, const char *dropboxPath,
+                            const char *localPath, char *errorOut, size_t errorOutSize);
 
 // Fetches the logged-in account's email address (POST
 // /2/users/get_current_account, which takes no arguments -- Dropbox's own

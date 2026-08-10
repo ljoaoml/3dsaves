@@ -10,6 +10,12 @@
 // starting point for manually importing a Checkpoint backup.
 #define CHECKPOINT_SAVES_DIR "sdmc:/3ds/Checkpoint/saves"
 
+// Same convention, for EXTDATA instead of SAVEDATA (Checkpoint's
+// Paths::extdataRoot() in the same file) -- a separate top-level folder,
+// not a subfolder of CHECKPOINT_SAVES_DIR, even though both use the same
+// "0x%05X <game name>" naming for the title underneath it.
+#define CHECKPOINT_EXTDATA_DIR "sdmc:/3ds/Checkpoint/extdata"
+
 typedef struct {
     char name[256];     // the backup instance's own folder name (Checkpoint names these, e.g. a timestamp)
     char fullPath[512]; // sdmc:/... path to that folder

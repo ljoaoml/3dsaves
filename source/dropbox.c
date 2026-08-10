@@ -8,6 +8,7 @@
 #include <string.h>
 
 #define DROPBOX_UPLOAD_URL "https://content.dropboxapi.com/2/files/upload"
+#define DROPBOX_DOWNLOAD_URL "https://content.dropboxapi.com/2/files/download"
 #define DROPBOX_LIST_FOLDER_URL "https://api.dropboxapi.com/2/files/list_folder"
 #define DROPBOX_GET_ACCOUNT_URL "https://api.dropboxapi.com/2/users/get_current_account"
 
@@ -17,7 +18,7 @@
 // Game titles routinely contain some of these (e.g. "The Legend of
 // Zelda: Ocarina of Time 3D"), so this can't just be inlined into a path
 // the way the old product-code-only naming could.
-static void dropbox_sanitize_name(const char *name, char *out, size_t outSize) {
+void dropbox_sanitize_name(const char *name, char *out, size_t outSize) {
     if (outSize == 0) return;
     size_t o = 0;
     for (const char *p = name; *p && o + 1 < outSize; p++) {
@@ -240,6 +241,88 @@ bool dropbox_list_backups(DropboxTokens *tokens, const char *gameName,
 
     if (outCount) *outCount = count;
     http_response_free(&resp);
+    return true;
+}
+
+bool dropbox_download_file(DropboxTokens *tokens, const char *dropboxPath,
+                            const char *localPath, char *errorOut, size_t errorOutSize) {
+    if (errorOut && errorOutSize > 0) errorOut[0] = '\0';
+
+    if (!auth_ensure_valid(tokens, false)) {
+        if (errorOut) snprintf(errorOut, errorOutSize, "not logged in / token refresh failed");
+        return false;
+    }
+
+    // Same JSON-in-a-header convention as dropbox_upload_file()'s
+    // Dropbox-API-Arg, just for /files/download's request instead of its
+    // response -- dropboxPath always comes from dropbox_build_game_folder()
+    // (already sanitized) joined with a name dropbox_list_backups() read
+    // straight back from Dropbox's own listing, so no extra escaping needed.
+    char apiArg[256];
+    snprintf(apiArg, sizeof(apiArg), "{\"path\":\"%s\"}", dropboxPath);
+
+    HttpResponse resp;
+    Result rc;
+    bool retried = false;
+
+    for (;;) {
+        char authHeader[sizeof(tokens->access_token) + 16]; // "Bearer " + token
+        snprintf(authHeader, sizeof(authHeader), "Bearer %s", tokens->access_token);
+        HttpHeader headers[] = {
+            {"Authorization", authHeader},
+            {"Dropbox-API-Arg", apiArg},
+        };
+
+        rc = http_request(HTTPC_METHOD_GET, DROPBOX_DOWNLOAD_URL, headers, 2, NULL, 0, &resp);
+        if (R_FAILED(rc)) {
+            if (errorOut) snprintf(errorOut, errorOutSize, "network error (0x%08lX)", (unsigned long)rc);
+            return false;
+        }
+
+        // Same 401-retry contract as dropbox_upload_file() above.
+        if (resp.status_code == 401 && !retried) {
+            http_response_free(&resp);
+            if (auth_ensure_valid(tokens, true)) {
+                retried = true;
+                continue;
+            }
+            if (errorOut) snprintf(errorOut, errorOutSize, "login expired -- log in again");
+            return false;
+        }
+
+        break;
+    }
+
+    if (resp.status_code != 200) {
+        char summary[256] = {0};
+        bool gotSummary = resp.body.data &&
+            json_get_string((const char *)resp.body.data, "error_summary", summary, sizeof(summary));
+        if (errorOut) {
+            if (gotSummary) snprintf(errorOut, errorOutSize, "%s", summary);
+            else snprintf(errorOut, errorOutSize, "HTTP %lu", (unsigned long)resp.status_code);
+        }
+        http_response_free(&resp);
+        return false;
+    }
+
+    // On success the whole response body IS the file's raw bytes (the
+    // download's own metadata -- name/size/hash -- rides in a
+    // Dropbox-API-Result response header instead, which this project has
+    // no need to read: localPath and the zip's own contents are enough).
+    FILE *f = fopen(localPath, "wb");
+    if (!f) {
+        if (errorOut) snprintf(errorOut, errorOutSize, "could not create local file");
+        http_response_free(&resp);
+        return false;
+    }
+    size_t written = resp.body.size > 0 ? fwrite(resp.body.data, 1, resp.body.size, f) : 0;
+    fclose(f);
+    http_response_free(&resp);
+
+    if (written != resp.body.size) {
+        if (errorOut) snprintf(errorOut, errorOutSize, "short write to SD card");
+        return false;
+    }
     return true;
 }
 

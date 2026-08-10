@@ -48,13 +48,13 @@ int http_get_last_response_bytes_received(void);
 // Which IP the most recent request's hostname resolved to, and what TLS
 // version/cipher suite got negotiated (or "?" if not gotten that far).
 // Lets a real-hardware result be compared directly against e.g.
-// `openssl s_client` run from a PC on the same network. Every request
-// also writes sdmc:/3ds/Konnect3DS/http_debug_<N>.log (a fresh <N> each
-// app launch, so a new test run never needs the old file deleted first;
-// overwritten in place for every request within that same run) with this
-// plus the exact request/response bytes -- check the highest-numbered
-// one after anything that fails in a way that's hard to diagnose from
-// just the Result code and these getters.
+// `openssl s_client` run from a PC on the same network. A request that
+// fails outright, or comes back with a non-2xx status, also (over)writes
+// sdmc:/3ds/Konnect3DS/http_debug.log with this plus the exact
+// request/response bytes -- a successful request doesn't touch it at all,
+// so its mere presence already means something went wrong; check it after
+// anything that fails in a way that's hard to diagnose from just the
+// Result code and these getters.
 const char *http_get_last_resolved_ip(void);
 const char *http_get_last_tls_version(void);
 const char *http_get_last_tls_cipher(void);
