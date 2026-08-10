@@ -1,7 +1,12 @@
 #---------------------------------------------------------------------------------
 # Konnect3DS - Nintendo 3DS homebrew save-to-cloud backup tool
 #
-# Requires devkitARM + libctru (devkitPro pacman package `3ds-dev`).
+# Requires devkitARM + libctru (devkitPro pacman package `3ds-dev`) plus
+# mbedTLS (devkitPro pacman package `3ds-mbedtls`, pulls in `3ds-zlib`):
+#                  (dkp-)pacman -S 3ds-mbedtls
+# The 3DS's own system httpc/TLS stack is too outdated to complete a
+# handshake with modern servers (see romfs/certs/README.md), so networking
+# is done over raw sockets (soc:u) + mbedTLS instead -- see source/http.c.
 # export DEVKITPRO=/opt/devkitpro ; export DEVKITARM=$DEVKITPRO/devkitARM
 #
 # `make`      -> Konnect3DS.3dsx (run via Homebrew Launcher, no extra tools)
@@ -47,20 +52,30 @@ CFLAGS	:=	-g -Wall -O2 -mword-relocations \
 			-fomit-frame-pointer -ffunction-sections \
 			$(ARCH)
 
-CFLAGS	+=	$(INCLUDE) -D__3DS__
+# Embeds the current git commit so the running app can show exactly what
+# source it was built from (see the header line printed in main.c) --
+# the point is to make "am I actually testing the build I think I am"
+# a one-glance check instead of a guessing game.
+GIT_HASH	:=	$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+ifneq ($(shell git status --porcelain 2>/dev/null),)
+GIT_HASH	:=	$(GIT_HASH)-dirty
+endif
+
+CFLAGS	+=	$(INCLUDE) -D__3DS__ -DKONNECT3DS_GIT_HASH=\"$(GIT_HASH)\"
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	-lctru -lm
+LIBS	:=	-lmbedtls -lmbedx509 -lmbedcrypto -lctru -lz -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(CTRULIB)
+PORTLIBS	:=	$(DEVKITPRO)/portlibs/3ds
+LIBDIRS	:= $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional

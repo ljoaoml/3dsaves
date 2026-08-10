@@ -15,22 +15,35 @@
 #define DROPBOX_CLIENT_ID "xxd9vkjyoedihll"
 #endif
 
-// Base URL (no trailing slash) of the OAuth relay in cloudflare-relay/,
-// used so the 3DS doesn't need the code typed in by hand: Dropbox
-// redirects the phone's browser to <RELAY_BASE_URL>/callback, and the 3DS
-// polls <RELAY_BASE_URL>/poll until the code shows up. See
-// cloudflare-relay/README.md for how to deploy your own. If left as the
-// placeholder below, login falls back to manual code entry (the original
-// no-redirect-URI flow) instead of polling.
+// Base URL (no trailing slash) of the OAuth relay in cloudflare-relay/.
+// The 3DS's own HTTPS requests to this relay always get a raw "400 Bad
+// Request" straight from Cloudflare's edge -- confirmed on real hardware
+// against workers.dev, a dedicated custom domain, and even an unrelated
+// third-party Cloudflare-fronted site, while the exact same client works
+// fine against api.dropboxapi.com. So the 3DS never talks to this relay
+// over the network at all: it just shows a QR code pointing at
+// <RELAY_BASE_URL>/start, and the relay does the *entire* OAuth exchange
+// server-side (Cloudflare -> Dropbox is a normal, unblocked
+// server-to-server request), ending with a page that offers a
+// downloadable, ready-to-use token file. The user copies that file onto
+// the SD card (e.g. via FTP) and it's picked up automatically -- see
+// cloudflare-relay/README.md. If left as the placeholder below, login
+// falls back to manual code entry (the original no-redirect-URI flow).
 #ifndef RELAY_BASE_URL
-#define RELAY_BASE_URL "https://konnect3ds-oauth-relay.ljoaomarcosalves.workers.dev"
+#define RELAY_BASE_URL "https://konnect3ds.vgchampions.org"
 #endif
 
-#define DROPBOX_TOKEN_FILE "sdmc:/Konnect3DS/dropbox_token.txt"
+#define DROPBOX_TOKEN_FILE "sdmc:/3ds/Konnect3DS/dropbox_token.txt"
 
 typedef struct {
-    char access_token[512];
-    char refresh_token[256];
+    // Dropbox's short-lived ("sl.u...") access tokens run well past 511
+    // bytes -- confirmed on real hardware: a real-world token got cut
+    // off at exactly 511 characters (the old buffer's usable limit) and
+    // was then rejected by Dropbox as invalid, twice in a row, since it
+    // was truncated before ever reaching the wire. Sized with real
+    // headroom, not just "one bump past the last failure".
+    char access_token[2048];
+    char refresh_token[512];
     u64 expires_at_unix; // 0 if unknown
     bool valid;
 } DropboxTokens;
@@ -50,6 +63,8 @@ void auth_delete_tokens(void);
 bool auth_run_login_flow(DropboxTokens *out);
 
 // Refreshes the access token using the stored refresh token if it looks
-// expired (or unconditionally if force_refresh is true). Updates `tokens`
-// and the on-disk copy in place.
-bool auth_ensure_valid(DropboxTokens *tokens);
+// expired (or unconditionally if force_refresh is true -- worth passing
+// explicitly rather than trusting expires_at_unix alone, since the 3DS's
+// own clock is not reliably UTC, see main.c's startup diagnostic).
+// Updates `tokens` and the on-disk copy in place.
+bool auth_ensure_valid(DropboxTokens *tokens, bool force_refresh);

@@ -3,14 +3,27 @@
 #include "auth.h"
 #include "dropbox.h"
 #include "saves.h"
+#include "sd_browse.h"
 
 #include <3ds.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
-#define TMP_ZIP_PATH "sdmc:/Konnect3DS/_tmp_backup.zip"
+#define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
+
+// Where Checkpoint (github.com/BernardoGiordano/Checkpoint) puts its own
+// save backups -- confirmed against Checkpoint's own source
+// (3ds/source/paths.cpp): each game gets a folder here named
+// "0x%05X <game name>" (the hex title unique ID, then a space, then the
+// sanitized game description). Used as the folder picker's starting
+// point when it exists, so picking up an existing Checkpoint backup is
+// just "open the picker, pick the game, confirm" instead of hunting
+// across the whole SD card.
+#define CHECKPOINT_SAVES_DIR "sdmc:/3ds/Checkpoint/saves"
 
 typedef struct {
     InstalledTitle *titles;
@@ -26,9 +39,10 @@ static const char *menu_label(int index, void *userdata) {
         return state->loggedIn ? "Log out of Dropbox" : "Log in to Dropbox";
     }
     if (index == 1) return "Refresh title list";
-    if (index == 2) return "Exit";
+    if (index == 2) return "Import save from folder...";
+    if (index == 3) return "Exit";
 
-    int titleIndex = index - 3;
+    int titleIndex = index - 4;
     InstalledTitle *t = &state->titles[titleIndex];
     const char *mediaLabel = t->mediaType == MEDIATYPE_SD ? "SD" : "Cart";
     if (t->name[0]) {
@@ -69,10 +83,9 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     ui_print("Save extracted. Uploading to Dropbox...\n");
     ui_flush();
 
-    char dropboxPath[128];
-    snprintf(dropboxPath, sizeof(dropboxPath), "/Konnect3DS/%s_%016llX.zip",
-              t->productCode[0] ? t->productCode : "UNKNOWN",
-              (unsigned long long)t->titleId);
+    char dropboxPath[192];
+    dropbox_build_game_path(t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown"),
+                             dropboxPath, sizeof(dropboxPath));
 
     char error[256];
     bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
@@ -91,12 +104,120 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     ui_wait_for_a();
 }
 
+// Strips Checkpoint's "0x%05X " title-unique-id prefix (see
+// CHECKPOINT_SAVES_DIR's comment above) off a folder's basename, if
+// present, so a Checkpoint-sourced folder gets a clean game name on
+// Dropbox instead of carrying the hex ID along. Any other folder name
+// (from manually browsing elsewhere) is used exactly as picked.
+static const char *display_name_for_folder(const char *folderPath) {
+    const char *base = strrchr(folderPath, '/');
+    base = base ? base + 1 : folderPath;
+
+    if (strncmp(base, "0x", 2) == 0) {
+        const char *p = base + 2;
+        int hexDigits = 0;
+        while (isxdigit((unsigned char)*p)) { p++; hexDigits++; }
+        if (hexDigits == 5 && *p == ' ' && p[1] != '\0') {
+            return p + 1;
+        }
+    }
+    return base;
+}
+
+static void import_and_upload(DropboxTokens *tokens) {
+    char startDir[64];
+    struct stat st;
+    if (stat(CHECKPOINT_SAVES_DIR, &st) == 0 && S_ISDIR(st.st_mode)) {
+        snprintf(startDir, sizeof(startDir), "%s", CHECKPOINT_SAVES_DIR);
+    } else {
+        snprintf(startDir, sizeof(startDir), "sdmc:/");
+    }
+
+    char pickedPath[512];
+    if (!sd_browse_pick_folder(startDir, pickedPath, sizeof(pickedPath))) {
+        return; // cancelled
+    }
+
+    const char *gameName = display_name_for_folder(pickedPath);
+
+    ui_clear();
+    ui_printf("Zipping %s...\n", gameName);
+    ui_flush();
+
+    Result rc = saves_backup_folder(pickedPath, TMP_ZIP_PATH);
+    if (R_FAILED(rc)) {
+        ui_print_error("\nCould not read that folder.\n");
+        ui_wait_for_a();
+        return;
+    }
+
+    ui_print("Uploading to Dropbox...\n");
+    ui_flush();
+
+    char dropboxPath[192];
+    dropbox_build_game_path(gameName, dropboxPath, sizeof(dropboxPath));
+
+    char error[256];
+    bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+
+    remove(TMP_ZIP_PATH);
+
+    if (ok) {
+        char msg[224];
+        snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
+        ui_print_success(msg);
+    } else {
+        char msg[288];
+        snprintf(msg, sizeof(msg), "\nUpload failed: %s\n", error);
+        ui_print_error(msg);
+    }
+    ui_wait_for_a();
+}
+
+// Temporary diagnostic: confirm on real hardware that the mbedTLS-over-
+// sockets rewrite of http.c (replacing the 3DS system httpc/TLS stack,
+// which cannot handshake with any modern server -- see
+// romfs/certs/README.md) actually completes a TLS connection, and shows
+// something on screen while it's blocked doing so instead of looking
+// frozen. Called against two different targets from main() below: see
+// the comment there for why. Remove once confirmed working.
+static void selftest_https(const char *label, const char *url) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "Testing connection to %s...\n", label);
+    ui_print(msg);
+    ui_flush();
+
+    HttpResponse testResp;
+    Result testRc = http_request(HTTPC_METHOD_GET, url, NULL, 0, NULL, 0, &testResp);
+    if (R_FAILED(testRc)) {
+        snprintf(msg, sizeof(msg), "[selftest] %s: FAIL rc=0x%08lX\n", label, (unsigned long)testRc);
+        ui_print_error(msg);
+        snprintf(msg, sizeof(msg), "  ip=%s tls=%s %s\n", http_get_last_resolved_ip(),
+                 http_get_last_tls_version(), http_get_last_tls_cipher());
+        ui_print(msg);
+        snprintf(msg, sizeof(msg), "  verify=%s\n", http_get_last_verify_info());
+        ui_print(msg);
+        snprintf(msg, sizeof(msg), "  verify flags: raw=0x%08lX after_mask=0x%08lX\n",
+                 (unsigned long)http_get_last_verify_flags_raw(),
+                 (unsigned long)http_get_last_verify_flags_after_mask());
+        ui_print(msg);
+        snprintf(msg, sizeof(msg), "  sent %d bytes, got %d bytes back\n",
+                 http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
+        ui_print(msg);
+    } else {
+        snprintf(msg, sizeof(msg), "[selftest] %s: OK HTTP %lu\n", label, (unsigned long)testResp.status_code);
+        ui_print_success(msg);
+        http_response_free(&testResp);
+    }
+}
+
 int main(void) {
     ui_init();
     romfsInit();
     http_init();
 
-    mkdir("sdmc:/Konnect3DS", 0777);
+    mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
+    mkdir("sdmc:/3ds/Konnect3DS", 0777);
 
     DropboxTokens tokens;
     MenuState state = {0};
@@ -106,36 +227,45 @@ int main(void) {
 
     ui_clear();
     ui_print_header("Konnect3DS - back up game saves to Dropbox");
-
-    // Temporary diagnostic: a plain HTTPS GET to a domain we're confident
-    // is NOT behind Cloudflare (www.dropbox.com serves via Dropbox's own
-    // "envoy" proxy, confirmed by response headers), to isolate whether
-    // basic HTTPS/cert-trust works on this build+console at all, versus
-    // something specific to Cloudflare's SNI-dependent edge (the current
-    // suspect for why the relay's *.workers.dev never validates even
-    // with a correct, verified root CA bundle). Remove once resolved.
+#ifndef KONNECT3DS_GIT_HASH
+#define KONNECT3DS_GIT_HASH "unknown"
+#endif
+    ui_printf("build %s\n", KONNECT3DS_GIT_HASH);
     {
-        HttpResponse testResp;
-        Result testRc = http_request(HTTPC_METHOD_GET, "https://www.dropbox.com/",
-                                      NULL, 0, NULL, 0, &testResp);
-        if (R_FAILED(testRc)) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "[selftest] dropbox.com: FAIL rc=0x%08lX\n", (unsigned long)testRc);
-            ui_print_error(msg);
+        // TLS certificate validation checks the cert's NotBefore/NotAfter
+        // against libc's time(), not the console's System Settings clock
+        // display directly -- printing what time() actually returns
+        // rules that mismatch in or out instead of trusting the two are
+        // the same thing.
+        time_t now = time(NULL);
+        struct tm *tmNow = localtime(&now);
+        char timeBuf[48];
+        if (tmNow) {
+            strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", tmNow);
         } else {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "[selftest] dropbox.com: OK HTTP %lu\n", (unsigned long)testResp.status_code);
-            ui_print_success(msg);
-            http_response_free(&testResp);
+            snprintf(timeBuf, sizeof(timeBuf), "(localtime failed)");
         }
+        ui_printf("system time: %s (raw=%lld)\n", timeBuf, (long long)now);
     }
+    ui_flush();
+
+    // api.dropboxapi.com is the domain the app actually talks to (token
+    // exchange/refresh) -- www.dropbox.com only ever opens in the phone's
+    // browser via the QR code, this app never fetches it, and the OAuth
+    // relay (cloudflare-relay/) is never contacted by the 3DS at all
+    // (see include/auth.h). example.com is a control target: if it and
+    // api.dropboxapi.com behave differently, that points at something
+    // specific to one side rather than a general bug in this app's TLS
+    // client.
+    selftest_https("api.dropboxapi.com", "https://api.dropboxapi.com/");
+    selftest_https("example.com (control)", "https://example.com/");
 
     ui_print("Select a title on the bottom screen, or\n");
     ui_print("log in to Dropbox first if you haven't yet.\n");
     ui_flush();
 
     while (aptMainLoop()) {
-        int total = 3 + (int)state.titleCount;
+        int total = 4 + (int)state.titleCount;
         int choice = ui_run_menu("Konnect3DS", total, menu_label, &state);
 
         if (choice < 0) break; // B on the top-level menu = quit
@@ -165,9 +295,18 @@ int main(void) {
             ui_printf("Found %lu titles.\n", (unsigned long)state.titleCount);
             ui_flush();
         } else if (choice == 2) {
+            if (!state.loggedIn) {
+                ui_clear();
+                ui_print("Log in to Dropbox first.\n");
+                ui_flush();
+                ui_wait_for_a();
+                continue;
+            }
+            import_and_upload(&tokens);
+        } else if (choice == 3) {
             break;
         } else {
-            int titleIndex = choice - 3;
+            int titleIndex = choice - 4;
             if (!state.loggedIn) {
                 ui_clear();
                 ui_print("Log in to Dropbox first.\n");

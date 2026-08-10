@@ -34,6 +34,43 @@ int http_get_loaded_cert_count(void);
 int http_get_total_cert_count(void);
 int http_get_last_trusted_count(void);
 
+// Diagnostics for the most recent request's TLS write/read progress, set
+// at the start of every request (before the connection attempt) and
+// updated as it goes: -1 means "never got that far" (e.g. request bytes
+// sent stays -1 if the handshake itself never completed), 0+ is an
+// actual byte count. Lets a failing request be told apart as "nothing
+// was ever sent", "sent fine but zero bytes of response ever came back"
+// (looks identical to a hung connection from the Result code alone) or
+// "some response arrived, then it stalled".
+int http_get_last_request_bytes_sent(void);
+int http_get_last_response_bytes_received(void);
+
+// Which IP the most recent request's hostname resolved to, and what TLS
+// version/cipher suite got negotiated (or "?" if not gotten that far).
+// Lets a real-hardware result be compared directly against e.g.
+// `openssl s_client` run from a PC on the same network. Every request
+// also writes sdmc:/3ds/Konnect3DS/http_debug_<N>.log (a fresh <N> each
+// app launch, so a new test run never needs the old file deleted first;
+// overwritten in place for every request within that same run) with this
+// plus the exact request/response bytes -- check the highest-numbered
+// one after anything that fails in a way that's hard to diagnose from
+// just the Result code and these getters.
+const char *http_get_last_resolved_ip(void);
+const char *http_get_last_tls_version(void);
+const char *http_get_last_tls_cipher(void);
+
+// If the most recent request failed specifically because the server's
+// TLS certificate didn't verify, this is mbedTLS's human-readable reason
+// why (untrusted CA, expired, hostname mismatch, ...) -- "?" otherwise.
+const char *http_get_last_verify_info(void);
+
+// Raw mbedtls_ssl_get_verify_result() bitmask from the most recent
+// connection attempt, before (raw) and after (after_mask) the
+// date-related flags (BADCERT_FUTURE, BADCERT_EXPIRED) are cleared.
+// 0xFFFFFFFF means no connection attempt got far enough to check.
+u32 http_get_last_verify_flags_raw(void);
+u32 http_get_last_verify_flags_after_mask(void);
+
 // Performs a single HTTPS request, following redirects (up to 5 hops).
 // `body`/`body_size` may be NULL/0 for methods without a request body.
 // On success fills `out` (caller must call http_response_free when done).
