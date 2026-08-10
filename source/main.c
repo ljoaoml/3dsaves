@@ -4,6 +4,7 @@
 #include "dropbox.h"
 #include "saves.h"
 #include "sd_browse.h"
+#include "checkpoint_saves.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -14,16 +15,13 @@
 #include <time.h>
 
 #define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
+#define MAX_LOCAL_BACKUPS 64
+#define MAX_DROPBOX_BACKUPS_SHOWN 32
 
-// Where Checkpoint (github.com/BernardoGiordano/Checkpoint) puts its own
-// save backups -- confirmed against Checkpoint's own source
-// (3ds/source/paths.cpp): each game gets a folder here named
-// "0x%05X <game name>" (the hex title unique ID, then a space, then the
-// sanitized game description). Used as the folder picker's starting
-// point when it exists, so picking up an existing Checkpoint backup is
-// just "open the picker, pick the game, confirm" instead of hunting
-// across the whole SD card.
-#define CHECKPOINT_SAVES_DIR "sdmc:/3ds/Checkpoint/saves"
+// CHECKPOINT_SAVES_DIR (checkpoint_saves.h) is also used below as the
+// folder picker's starting point when it exists, so picking up an
+// existing Checkpoint backup by hand is just "open the picker, pick the
+// game, confirm" instead of hunting across the whole SD card.
 
 typedef struct {
     InstalledTitle *titles;
@@ -55,27 +53,100 @@ static const char *menu_label(int index, void *userdata) {
     return buf;
 }
 
+static const u16 *title_icon_pixels(int index, void *userdata) {
+    const MenuState *state = (const MenuState *)userdata;
+    return state->titles[index].icon;
+}
+
 static void refresh_titles(MenuState *state) {
     if (state->titles) free(state->titles);
     state->titles = NULL;
     state->titleCount = 0;
     saves_list_titles(&state->titles, &state->titleCount);
+    ui_set_home_icons((int)state->titleCount, title_icon_pixels, state);
 }
 
-static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int titleIndex) {
+static const char *title_display_name(const InstalledTitle *t) {
+    return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
+}
+
+// One entry in show_game_detail()'s local-backup picker: either the
+// title's own live save data, or one of Checkpoint's own backup instances
+// for it (see checkpoint_saves.h).
+typedef struct {
+    char label[256];
+    bool isLive;
+    const CheckpointBackup *checkpoint; // NULL when isLive
+} LocalBackupEntry;
+
+static const char *local_backup_label(int index, void *userdata) {
+    const LocalBackupEntry *entries = (const LocalBackupEntry *)userdata;
+    return entries[index].label;
+}
+
+// Prints the game's header plus whatever's already uploaded to its Dropbox
+// folder on the top screen -- the "cloud side" of show_game_detail()'s
+// split view, sitting opposite the bottom screen's local-backup picker.
+static void print_dropbox_backups(DropboxTokens *tokens, const char *gameName) {
+    ui_clear();
+    ui_print_header(gameName);
+
+    char folder[192];
+    dropbox_build_game_folder(gameName, folder, sizeof(folder));
+    ui_printf("Dropbox: %s\n\n", folder);
+
+    static DropboxBackupEntry entries[MAX_DROPBOX_BACKUPS_SHOWN];
+    int count = 0;
+    char error[256];
+    if (!dropbox_list_backups(tokens, gameName, entries, MAX_DROPBOX_BACKUPS_SHOWN, &count,
+                               error, sizeof(error))) {
+        char msg[288];
+        snprintf(msg, sizeof(msg), "Could not check Dropbox: %s\n", error);
+        ui_print_error(msg);
+    } else if (count == 0) {
+        ui_print("No backups uploaded yet.\n");
+    } else {
+        for (int i = 0; i < count; i++) {
+            if (entries[i].size >= 0) {
+                ui_printf("%s (%ld KB)\n", entries[i].name, entries[i].size / 1024);
+            } else {
+                ui_printf("%s\n", entries[i].name);
+            }
+        }
+    }
+    ui_flush();
+}
+
+// Backs up and uploads one local backup instance (the live save, or one
+// Checkpoint folder) under its own Dropbox filename -- see
+// dropbox_build_backup_path() -- so repeated uploads for the same game
+// accumulate instead of overwriting each other.
+static void upload_local_backup(MenuState *state, DropboxTokens *tokens, int titleIndex,
+                                 const LocalBackupEntry *entry) {
     InstalledTitle *t = &state->titles[titleIndex];
+    const char *gameName = title_display_name(t);
 
     ui_clear();
-    ui_printf("Backing up %s...\n",
-              t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "unknown title"));
+    ui_printf("Backing up %s...\n", entry->label);
     ui_flush();
 
-    Result rc = saves_backup_title(t, TMP_ZIP_PATH);
+    char label[256];
+    Result rc;
+    if (entry->isLive) {
+        time_t now = time(NULL);
+        struct tm *tmNow = localtime(&now);
+        if (tmNow) strftime(label, sizeof(label), "%Y%m%d-%H%M%S", tmNow);
+        else snprintf(label, sizeof(label), "backup");
+        rc = saves_backup_title(t, TMP_ZIP_PATH);
+    } else {
+        snprintf(label, sizeof(label), "%s", entry->checkpoint->name);
+        rc = saves_backup_folder(entry->checkpoint->fullPath, TMP_ZIP_PATH);
+    }
+
     if (R_FAILED(rc)) {
         char msg[96];
         snprintf(msg, sizeof(msg), "\nFailed to read save data (0x%08lX).\n", (unsigned long)rc);
         ui_print_error(msg);
-        ui_print("Does this title have any save data yet?\n");
         ui_wait_for_a();
         return;
     }
@@ -84,8 +155,7 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     ui_flush();
 
     char dropboxPath[192];
-    dropbox_build_game_path(t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown"),
-                             dropboxPath, sizeof(dropboxPath));
+    dropbox_build_backup_path(gameName, label, dropboxPath, sizeof(dropboxPath));
 
     char error[256];
     bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
@@ -93,7 +163,7 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
     remove(TMP_ZIP_PATH);
 
     if (ok) {
-        char msg[160];
+        char msg[224];
         snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
         ui_print_success(msg);
     } else {
@@ -102,6 +172,46 @@ static void backup_and_upload(MenuState *state, DropboxTokens *tokens, int title
         ui_print_error(msg);
     }
     ui_wait_for_a();
+}
+
+// The per-game screen: top shows what's already backed up to Dropbox
+// (print_dropbox_backups()), bottom is a picker (ui_run_menu(), same
+// Up/Down/A/B as every other menu here) over the title's local backup
+// instances -- its own live save data plus any Checkpoint backups found
+// for it. Picking one uploads it and loops back (refreshing both the
+// Checkpoint scan and the Dropbox listing) instead of returning, so
+// several backups can be uploaded in one visit; B backs out to the title
+// list.
+static void show_game_detail(MenuState *state, DropboxTokens *tokens, int titleIndex) {
+    InstalledTitle *t = &state->titles[titleIndex];
+    const char *gameName = title_display_name(t);
+
+    static CheckpointBackup checkpointBackups[MAX_LOCAL_BACKUPS];
+    static LocalBackupEntry entries[MAX_LOCAL_BACKUPS + 1];
+
+    for (;;) {
+        int checkpointCount = 0;
+        checkpoint_list_backups(t->titleId, checkpointBackups, MAX_LOCAL_BACKUPS, &checkpointCount);
+
+        int entryCount = 0;
+        snprintf(entries[entryCount].label, sizeof(entries[entryCount].label), "Current save data (live)");
+        entries[entryCount].isLive = true;
+        entries[entryCount].checkpoint = NULL;
+        entryCount++;
+        for (int i = 0; i < checkpointCount && entryCount < MAX_LOCAL_BACKUPS + 1; i++) {
+            snprintf(entries[entryCount].label, sizeof(entries[entryCount].label), "%s", checkpointBackups[i].name);
+            entries[entryCount].isLive = false;
+            entries[entryCount].checkpoint = &checkpointBackups[i];
+            entryCount++;
+        }
+
+        print_dropbox_backups(tokens, gameName);
+
+        int choice = ui_run_menu(gameName, entryCount, local_backup_label, entries);
+        if (choice < 0) return; // B: back to the title list
+
+        upload_local_backup(state, tokens, titleIndex, &entries[choice]);
+    }
 }
 
 // Strips Checkpoint's "0x%05X " title-unique-id prefix (see
@@ -212,8 +322,10 @@ static void selftest_https(const char *label, const char *url) {
 }
 
 int main(void) {
-    ui_init();
+    // romfsInit() must run before ui_init(): ui_init() loads the
+    // background/folder-icon textures from romfs:/gfx/*.t3x.
     romfsInit();
+    ui_init();
     http_init();
 
     mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
@@ -314,13 +426,13 @@ int main(void) {
                 ui_wait_for_a();
                 continue;
             }
-            backup_and_upload(&state, &tokens, titleIndex);
+            show_game_detail(&state, &tokens, titleIndex);
         }
     }
 
     if (state.titles) free(state.titles);
     http_exit();
-    romfsExit();
     ui_exit();
+    romfsExit();
     return 0;
 }

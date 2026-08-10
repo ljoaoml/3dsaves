@@ -33,6 +33,10 @@ include $(DEVKITARM)/3ds_rules
 # SOURCES is a list of directories containing source code
 # DATA is a list of directories containing data files
 # INCLUDES is a list of directories containing header files
+# GRAPHICS is a list of directories containing .t3s texture specs (tex3ds
+#   input) -- built into .t3x sprite sheets under $(GFXBUILD) and loaded at
+#   runtime via C2D_SpriteSheetLoad("romfs:/gfx/*.t3x"), not linked into the
+#   ELF, so they land in the RomFS build (GFXBUILD) rather than DATA/BUILD.
 # ROMFS is the directory containing data to be added to RomFS
 # RESOURCES holds the CIA-only metadata: AppInfo (title/author/ids) and
 #   template.rsf (permissions), plus icon.png/banner.png/audio.wav
@@ -42,7 +46,9 @@ BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
 INCLUDES	:=	include
+GRAPHICS	:=	gfx
 ROMFS		:=	romfs
+GFXBUILD	:=	$(ROMFS)/gfx
 RESOURCES	:=	resources
 
 include $(TOPDIR)/$(RESOURCES)/AppInfo
@@ -91,7 +97,8 @@ export OUTPUT	:=	$(CURDIR)/$(TARGET)
 export TOPDIR	:=	$(CURDIR)
 
 export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
-					$(foreach dir,$(DATA),$(CURDIR)/$(dir))
+					$(foreach dir,$(DATA),$(CURDIR)/$(dir)) \
+					$(foreach dir,$(GRAPHICS),$(CURDIR)/$(dir))
 
 export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 
@@ -99,6 +106,9 @@ CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
+GFXFILES	:=	$(foreach dir,$(GRAPHICS),$(notdir $(wildcard $(dir)/*.t3s)))
+export ROMFS_T3XFILES	:=	$(patsubst %.t3s,$(GFXBUILD)/%.t3x,$(GFXFILES))
+export T3XHFILES		:=	$(patsubst %.t3s,$(BUILD)/%.h,$(GFXFILES))
 
 #---------------------------------------------------------------------------------
 # use CXX for linking C++ projects, CC for standard C
@@ -141,22 +151,36 @@ ifneq ($(ROMFS),)
 	export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: $(BUILD) clean all cia
+.PHONY: $(BUILD) $(GFXBUILD) clean all cia
 
 #---------------------------------------------------------------------------------
-all: $(BUILD)
+all: $(BUILD) $(GFXBUILD) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile 3dsx
 
-cia: $(BUILD)
+cia: $(BUILD) $(GFXBUILD) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile cia
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
 
+$(GFXBUILD):
+	@[ -d $@ ] || mkdir -p $@
+
+#---------------------------------------------------------------------------------
+# .t3s (tex3ds spec) -> .t3x sprite sheet + .h, run in this outer make pass
+# (not the recursive -C $(BUILD) one) since it writes into $(GFXBUILD)
+# (romfs/gfx) and $(BUILD), both only set up here. The .h is unused (no C
+# source references the generated indices, since each spec here is a single
+# image, always index 0) but tex3ds always emits it alongside the .t3x.
+#---------------------------------------------------------------------------------
+$(GFXBUILD)/%.t3x	$(BUILD)/%.h	:	%.t3s
+	@echo $(notdir $<)
+	@tex3ds -i $< -H $(BUILD)/$*.h -d $(DEPSDIR)/$*.d -o $(GFXBUILD)/$*.t3x
+
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(TARGET).cia icon.icn banner.bnr
+	@rm -fr $(BUILD) $(GFXBUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(TARGET).cia icon.icn banner.bnr
 
 #---------------------------------------------------------------------------------
 else

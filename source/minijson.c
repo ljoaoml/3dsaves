@@ -62,3 +62,68 @@ bool json_get_bool(const char *json, const char *key, bool *out) {
     if (strncmp(p, "false", 5) == 0) { *out = false; return true; }
     return false;
 }
+
+// Skips a JSON string literal starting at *p (which must point at the
+// opening '"'), leaving *p just past the closing '"'. Shared by
+// json_find_array()/json_array_next_object() so a '[', ']', '{' or '}'
+// inside a string value (e.g. a file name containing a literal bracket)
+// doesn't confuse their depth counting.
+static void skip_string(const char **p) {
+    (*p)++; // past opening '"'
+    while (**p && **p != '"') {
+        if (**p == '\\' && (*p)[1]) (*p)++;
+        (*p)++;
+    }
+    if (**p == '"') (*p)++; // past closing '"'
+}
+
+const char *json_find_array(const char *json, const char *key, const char **arrayEnd) {
+    const char *p = find_value(json, key);
+    if (!p || *p != '[') return NULL;
+    p++; // past '['
+
+    const char *q = p;
+    int depth = 1;
+    while (*q && depth > 0) {
+        if (*q == '"') { skip_string(&q); continue; }
+        if (*q == '[') depth++;
+        else if (*q == ']') { depth--; if (depth == 0) break; }
+        q++;
+    }
+    if (depth != 0) return NULL; // malformed/truncated
+
+    *arrayEnd = q;
+    return p;
+}
+
+bool json_array_next_object(const char **cursor, const char *arrayEnd, char *out, size_t outSize) {
+    if (outSize == 0) return false;
+
+    const char *p = *cursor;
+    while (p < arrayEnd && *p != '{') {
+        if (*p == '"') { skip_string(&p); continue; }
+        p++;
+    }
+    if (p >= arrayEnd) return false;
+
+    const char *start = p;
+    int depth = 0;
+    while (p < arrayEnd) {
+        if (*p == '"') { skip_string(&p); continue; }
+        if (*p == '{') depth++;
+        else if (*p == '}') {
+            depth--;
+            if (depth == 0) { p++; break; }
+        }
+        p++;
+    }
+    if (depth != 0) return false; // malformed/truncated
+
+    size_t len = (size_t)(p - start);
+    size_t copyLen = len < outSize - 1 ? len : outSize - 1;
+    memcpy(out, start, copyLen);
+    out[copyLen] = '\0';
+
+    *cursor = p;
+    return true;
+}

@@ -49,9 +49,10 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         t->mediaType = mediatype;
         memset(t->productCode, 0, sizeof(t->productCode));
         AM_GetTitleProductCode(mediatype, ids[i], t->productCode);
-        // Best-effort: leaves t->name empty if the title has no readable
-        // SMDH, callers fall back to showing the product code instead.
-        title_get_name(ids[i], mediatype, t->name, sizeof(t->name));
+        // Best-effort: leaves t->name empty and t->icon all-zero if the
+        // title has no readable SMDH, callers fall back to showing the
+        // product code / a plain placeholder instead.
+        title_get_info(ids[i], mediatype, t->name, sizeof(t->name), t->icon);
         (*count)++;
     }
 

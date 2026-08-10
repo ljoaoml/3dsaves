@@ -4,6 +4,7 @@
 #include <citro3d.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Real GPU-drawn UI via citro2d, replacing the old libctru text console.
@@ -35,6 +36,14 @@
 #define MARGIN_Y 6.0f
 #define VISIBLE_LOG_LINES 15 // (240 - 2*MARGIN_Y) / LINE_HEIGHT, floored
 
+// Title icon "shelf" across the top of the top screen (see
+// ui_set_home_icons()). Tiles are drawn at a fixed size regardless of the
+// SMDH icon's native 48x48 -- C2D_DrawImageAt's scale factors handle that.
+#define ICON_TILE_SIZE 32.0f
+#define ICON_TILE_GAP 6.0f
+#define ICON_SHELF_Y MARGIN_Y
+#define ICON_SHELF_HEIGHT (ICON_TILE_SIZE + 10.0f)
+
 // Cleared once per present() (confirmed against devkitPro's own
 // system-font example: C2D_TextBufClear() is called once per frame, not
 // once per C2D_TextParse() -- multiple texts safely share one buffer
@@ -47,6 +56,31 @@
 static C3D_RenderTarget *s_top;
 static C3D_RenderTarget *s_bottom;
 static C2D_TextBuf s_textBuf;
+
+// Background pattern + folder icon (see gfx/*.t3s), loaded from RomFS at
+// startup. Both are optional -- a texture that fails to load (e.g. an old
+// .3dsx built before the gfx/ pipeline existed, or a stripped-down RomFS)
+// just leaves the plain COLOR_BG fill visible instead of crashing.
+static C2D_SpriteSheet s_bgSheet;
+static C2D_Image s_bgImage;
+static bool s_bgLoaded;
+static C2D_SpriteSheet s_folderIconSheet;
+static C2D_Image s_folderIcon;
+static bool s_folderIconLoaded;
+
+// Title icon shelf (see ui_set_home_icons()). Every title icon is built
+// the same way -- 48x48 source data copied top-left-anchored into a 64x64
+// GPU_RGB565 texture -- so they all share one subtexture describing that
+// same 48x48-within-64x64 region; only the underlying C3D_Tex differs
+// per title. `valid[i]` false means index i's C3D_Tex was never
+// successfully initialized (e.g. get_pixels() returned NULL for it) and
+// must not be drawn/deleted.
+static const Tex3DS_SubTexture s_titleIconSubtex = {
+    48, 48, 0.0f, 1.0f, 48.0f / 64.0f, 1.0f - 48.0f / 64.0f
+};
+static C3D_Tex *s_titleIconTex;
+static bool *s_titleIconValid;
+static int s_titleIconCount;
 
 static u32 COLOR_BG;
 static u32 COLOR_TEXT;
@@ -89,6 +123,87 @@ static struct {
 
 static const char *s_confirmPrompt;
 
+static void free_home_icons(void) {
+    for (int i = 0; i < s_titleIconCount; i++) {
+        if (s_titleIconValid[i]) C3D_TexDelete(&s_titleIconTex[i]);
+    }
+    free(s_titleIconTex);
+    free(s_titleIconValid);
+    s_titleIconTex = NULL;
+    s_titleIconValid = NULL;
+    s_titleIconCount = 0;
+}
+
+void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata) {
+    free_home_icons();
+    if (count <= 0) return;
+
+    s_titleIconTex = calloc((size_t)count, sizeof(C3D_Tex));
+    s_titleIconValid = calloc((size_t)count, sizeof(bool));
+    if (!s_titleIconTex || !s_titleIconValid) {
+        free(s_titleIconTex);
+        free(s_titleIconValid);
+        s_titleIconTex = NULL;
+        s_titleIconValid = NULL;
+        return;
+    }
+    s_titleIconCount = count;
+
+    for (int i = 0; i < count; i++) {
+        const u16 *pixels = get_pixels ? get_pixels(i, userdata) : NULL;
+        if (!pixels) continue;
+        if (!C3D_TexInit(&s_titleIconTex[i], 64, 64, GPU_RGB565)) continue;
+
+        // Same top-left-anchored 48x48-in-64x64 tile copy as
+        // s_titleIconSubtex describes -- see its comment. No de-swizzling
+        // needed: SMDH icon data is already laid out in the GPU's own
+        // tiled format (confirmed against Checkpoint's IconStore::realize
+        // and 3ds-hbmenu's menuEntryParseSmdh, both of which do the exact
+        // same raw memcpy).
+        u16 *dest = (u16 *)s_titleIconTex[i].data;
+        const u16 *src = pixels;
+        for (int row = 0; row < 48; row += 8) {
+            memcpy(dest, src, 48 * 8 * sizeof(u16));
+            src += 48 * 8;
+            dest += 64 * 8;
+        }
+        s_titleIconValid[i] = true;
+    }
+}
+
+// Horizontal strip of icon tiles across the top of the top screen: the
+// folder icon (standing in for "browse SD card" -- there's no menu index
+// tied to it, it's just decorative context for what the icon shelf is
+// showing) followed by up to as many title icons as fit. Purely a visual
+// "here are your games" header; unlike the bottom screen's ui_run_menu(),
+// nothing here is independently selectable -- see ui_set_home_icons()'s
+// doc comment for why that scope was cut.
+static void draw_icon_shelf(void) {
+    float x = MARGIN_X;
+    float y = ICON_SHELF_Y;
+    float step = ICON_TILE_SIZE + ICON_TILE_GAP;
+
+    if (s_folderIconLoaded) {
+        C2D_DrawImageAt(s_folderIcon, x, y, 0.0f, NULL,
+                         ICON_TILE_SIZE / s_folderIcon.subtex->width,
+                         ICON_TILE_SIZE / s_folderIcon.subtex->height);
+        x += step;
+    }
+
+    int maxTiles = (int)((TOP_W - x) / step);
+    if (maxTiles < 0) maxTiles = 0;
+    int shown = s_titleIconCount < maxTiles ? s_titleIconCount : maxTiles;
+    for (int i = 0; i < shown; i++) {
+        if (s_titleIconValid[i]) {
+            C2D_Image img = { &s_titleIconTex[i], &s_titleIconSubtex };
+            C2D_DrawImageAt(img, x, y, 0.0f, NULL, ICON_TILE_SIZE / 48.0f, ICON_TILE_SIZE / 48.0f);
+        } else {
+            C2D_DrawRectSolid(x, y, 0.0f, ICON_TILE_SIZE, ICON_TILE_SIZE, COLOR_MUTED);
+        }
+        x += step;
+    }
+}
+
 void ui_init(void) {
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -98,6 +213,16 @@ void ui_init(void) {
     s_top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     s_bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     s_textBuf = C2D_TextBufNew(TEXTBUF_GLYPHS);
+
+    // Requires romfsInit() to have already run (main() calls it before
+    // ui_init() for exactly this reason) -- these are RomFS paths.
+    s_bgSheet = C2D_SpriteSheetLoad("romfs:/gfx/bgpattern.t3x");
+    s_bgLoaded = s_bgSheet != NULL;
+    if (s_bgLoaded) s_bgImage = C2D_SpriteSheetGetImage(s_bgSheet, 0);
+
+    s_folderIconSheet = C2D_SpriteSheetLoad("romfs:/gfx/folder_icon.t3x");
+    s_folderIconLoaded = s_folderIconSheet != NULL;
+    if (s_folderIconLoaded) s_folderIcon = C2D_SpriteSheetGetImage(s_folderIconSheet, 0);
 
     // A small, dark, teal-accented palette -- not trying to be a
     // pixel-exact clone of any particular app, just a reasonable-looking
@@ -116,10 +241,24 @@ void ui_init(void) {
 }
 
 void ui_exit(void) {
+    free_home_icons();
+    if (s_folderIconLoaded) C2D_SpriteSheetFree(s_folderIconSheet);
+    if (s_bgLoaded) C2D_SpriteSheetFree(s_bgSheet);
     C2D_TextBufDelete(s_textBuf);
     C2D_Fini();
     C3D_Fini();
     gfxExit();
+}
+
+// Stretches the background image to exactly fill a screenW x screenH
+// target -- slight aspect distortion (400x240 top vs 320x240 bottom, vs.
+// the source image's own aspect ratio) is an acceptable tradeoff for
+// "always fills the screen with no letterboxing" over pixel-perfect aspect.
+static void draw_background(float screenW, float screenH) {
+    if (!s_bgLoaded) return;
+    float scaleX = screenW / s_bgImage.subtex->width;
+    float scaleY = screenH / s_bgImage.subtex->height;
+    C2D_DrawImageAt(s_bgImage, 0.0f, 0.0f, 0.0f, NULL, scaleX, scaleY);
 }
 
 static void log_append_line(LogLine *lines, int *count, const char *text, u32 color, LogKind kind) {
@@ -161,9 +300,13 @@ static void log_append(LogLine *lines, int *count, const char *text, u32 color) 
     }
 }
 
-static void draw_log(const LogLine *lines, int count, float screenW) {
+static void draw_log(const LogLine *lines, int count, float screenW, float startY) {
+    // VISIBLE_LOG_LINES assumes a MARGIN_Y start; when startY is pushed
+    // down (top screen, icon shelf present), a couple of lines' worth can
+    // run past the bottom edge before scrolling catches up -- cosmetic
+    // scroll-lag, not a crash, and not worth a second constant for.
     int start = count > VISIBLE_LOG_LINES ? count - VISIBLE_LOG_LINES : 0;
-    float y = MARGIN_Y;
+    float y = startY;
     for (int i = start; i < count; i++) {
         const LogLine *line = &lines[i];
         if (line->kind == LOG_RULE) {
@@ -242,18 +385,22 @@ static void present(ui_top_draw_fn drawTop, void *topUserdata) {
 
     C2D_TargetClear(s_top, COLOR_BG);
     C2D_SceneBegin(s_top);
+    draw_background(TOP_W, TOP_H);
     if (drawTop) {
         drawTop(topUserdata);
     } else {
-        draw_log(s_topLines, s_topCount, TOP_W);
+        bool hasShelf = s_titleIconCount > 0 || s_folderIconLoaded;
+        if (hasShelf) draw_icon_shelf();
+        draw_log(s_topLines, s_topCount, TOP_W, hasShelf ? ICON_SHELF_Y + ICON_SHELF_HEIGHT : MARGIN_Y);
     }
 
     C2D_TargetClear(s_bottom, COLOR_BG);
     C2D_SceneBegin(s_bottom);
+    draw_background(BOTTOM_W, BOTTOM_H);
     switch (s_bottomMode) {
         case BOTTOM_MENU:    draw_menu(); break;
         case BOTTOM_CONFIRM: draw_confirm(); break;
-        default:              draw_log(s_bottomLines, s_bottomCount, BOTTOM_W); break;
+        default:              draw_log(s_bottomLines, s_bottomCount, BOTTOM_W, MARGIN_Y); break;
     }
 
     C3D_FrameEnd(0);

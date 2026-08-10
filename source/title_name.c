@@ -14,11 +14,31 @@ typedef struct {
     u16 publisher[0x40];
 } SMDH_ApplicationTitle;
 
+// Fields nobody here reads individually, but their exact sizes are what
+// make bigIconData land at the right offset -- struct layout cross-checked
+// against Checkpoint's own smdh.hpp (FlagBrew/Checkpoint), whose settings
+// field sizes sum to the same 0x36C0 total this file already used for
+// TITLE_ICON_SIZE before this struct grew far enough to prove it.
+typedef struct {
+    u8 game_ratings[0x10];
+    u32 region_lock;
+    u8 matchmaker_id[0xC];
+    u32 flags;
+    u16 eula_version;
+    u16 reserved;
+    u32 default_frame;
+    u32 cec_id;
+} SMDH_Settings;
+
 typedef struct {
     u32 magic;
     u16 version;
     u16 reserved;
     SMDH_ApplicationTitle titles[16];
+    SMDH_Settings settings;
+    u8 reserved2[0x8];
+    u8 small_icon_data[0x480];  // 24x24 RGB565, unused here
+    u16 big_icon_data[0x900];   // 48x48 RGB565, tiled (see title_get_info())
 } SMDH_Header;
 
 static u8 get_smdh_language_index(void) {
@@ -80,9 +100,10 @@ static void utf16_field_to_ascii(const u16 *in, size_t inMaxChars, char *out, si
     out[o] = '\0';
 }
 
-bool title_get_name(u64 titleId, FS_MediaType media, char *out, size_t outSize) {
-    if (!out || outSize == 0) return false;
-    out[0] = '\0';
+bool title_get_info(u64 titleId, FS_MediaType media,
+                     char *nameOut, size_t nameOutSize, u16 *iconOut) {
+    if (nameOut && nameOutSize > 0) nameOut[0] = '\0';
+    if (iconOut) memset(iconOut, 0, TITLE_BIG_ICON_PIXELS * sizeof(u16));
 
     u8 *iconData = malloc(TITLE_ICON_SIZE);
     if (!iconData) return false;
@@ -99,16 +120,15 @@ bool title_get_name(u64 titleId, FS_MediaType media, char *out, size_t outSize) 
         return false;
     }
 
-    u8 lang = get_smdh_language_index();
-    const u16 *field = smdh->titles[lang].short_desc;
-    if (field[0] == 0) field = smdh->titles[1].short_desc; // fall back to English
-
-    if (field[0] == 0) {
-        free(iconData);
-        return false;
+    if (nameOut && nameOutSize > 0) {
+        u8 lang = get_smdh_language_index();
+        const u16 *field = smdh->titles[lang].short_desc;
+        if (field[0] == 0) field = smdh->titles[1].short_desc; // fall back to English
+        if (field[0] != 0) utf16_field_to_ascii(field, 0x40, nameOut, nameOutSize);
     }
 
-    utf16_field_to_ascii(field, 0x40, out, outSize);
+    if (iconOut) memcpy(iconOut, smdh->big_icon_data, TITLE_BIG_ICON_PIXELS * sizeof(u16));
+
     free(iconData);
-    return out[0] != '\0';
+    return true;
 }

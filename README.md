@@ -140,6 +140,10 @@ Produces `Konnect3DS.3dsx` (+ `.smdh`). Copy it to `/3ds/Konnect3DS/` on the SD
 card and launch via Homebrew Launcher — **`.3dsx` is not something FBI
 installs**, it just runs directly from that launcher.
 
+`gfx/*.t3s` (background pattern, folder icon) get compiled by `tex3ds`
+into `romfs/gfx/*.t3x` and loaded at runtime via `C2D_SpriteSheetLoad()` —
+`tex3ds` is already part of the `3ds-dev` group above, no separate install.
+
 ### Building a `.cia` instead (installs with FBI)
 
 Needs two extra tools that aren't part of the base `3ds-dev` group:

@@ -1,4 +1,5 @@
 #pragma once
+#include "title_name.h"
 #include <3ds.h>
 #include <stdbool.h>
 
@@ -7,6 +8,11 @@ typedef struct {
     FS_MediaType mediaType;
     char productCode[16]; // e.g. "CTR-P-AREE"
     char name[64];        // friendly name from the title's SMDH, empty if unavailable
+    // Raw 48x48 RGB565 icon pixels, still SMDH/GPU-tiled (see
+    // title_get_info()) -- all-zero (opaque black) if unavailable. ui.c's
+    // icon grid builds a GPU texture from this once per title list
+    // refresh rather than re-reading the SMDH every frame.
+    u16 icon[TITLE_BIG_ICON_PIXELS];
 } InstalledTitle;
 
 // Lists installed titles (SD + inserted cartridge) that are regular

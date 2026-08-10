@@ -1,4 +1,5 @@
 #pragma once
+#include <3ds/types.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -62,3 +63,16 @@ void ui_clear_bottom(void);
 void ui_print_bottom(const char *text);
 void ui_printf_bottom(const char *fmt, ...);
 void ui_print_header_bottom(const char *title);
+
+// Builds (and replaces any previous set of) the title icon "shelf" drawn
+// across the top of the top screen in the normal log view -- get_pixels(i,
+// userdata) must return either NULL ("no icon", drawn as a plain
+// placeholder tile) or a pointer to TITLE_BIG_ICON_PIXELS (see
+// title_name.h) u16s of raw RGB565 icon data; the pixel data is copied
+// into GPU textures immediately and not referenced afterward, so a
+// temporary buffer is fine. Call this again (main.c does, after every
+// title list refresh) to replace the whole shelf; pass count 0 to clear
+// it. ui.c intentionally doesn't know about InstalledTitle/saves.h --
+// this callback indirection keeps it a generic rendering module.
+typedef const u16 *(*ui_icon_pixels_fn)(int index, void *userdata);
+void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata);
