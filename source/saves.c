@@ -97,6 +97,200 @@ static bool extdata_accessible(u64 titleId) {
     return true;
 }
 
+// --- GBA Virtual Console injects ---------------------------------------
+//
+// A GBA VC inject's save never lives in the normal SAVEDATA archive at all
+// (savedata_accessible() above fails for it) -- it's a separate AGBSAVE
+// container only reachable through the PxiFS0 service, which a regular app
+// has no session to. Checkpoint reaches it by "stealing" one via
+// svcControlService(SERVICEOP_STEAL_CLIENT_SESSION, ...), an undocumented
+// syscall added by Luma3DS's kernel patches (not a stock ARM11 syscall, and
+// not part of stock libctru -- ported from Checkpoint's own csvc.hpp,
+// itself adapted from Luma3DS). On any other CFW (or none) this call just
+// fails and GBA VC titles silently go back to not showing up, same as
+// before this existed.
+typedef enum {
+    SERVICEOP_STEAL_CLIENT_SESSION = 0,
+    SERVICEOP_GET_NAME = 1,
+} ServiceOp;
+
+extern Result svcControlService(ServiceOp op, ...);
+
+static Handle s_fsPxiHandle = 0;
+static bool s_fsPxiTried = false;
+static bool s_fsPxiOk = false;
+
+static bool ensure_fspxi(void) {
+    if (s_fsPxiTried) return s_fsPxiOk;
+    s_fsPxiTried = true;
+    Result rc = svcControlService(SERVICEOP_STEAL_CLIENT_SESSION, &s_fsPxiHandle, "PxiFS0");
+    s_fsPxiOk = R_SUCCEEDED(rc);
+    return s_fsPxiOk;
+}
+
+static Result open_raw_gba_archive(const InstalledTitle *title, FSPXI_Archive *archive) {
+    if (!ensure_fspxi()) return -1;
+    u32 path[4] = {
+        (u32)(title->titleId & 0xFFFFFFFFULL),
+        (u32)(title->titleId >> 32),
+        (u32)title->mediaType,
+        1,
+    };
+    FS_Path binPath = { PATH_BINARY, sizeof(path), path };
+    return FSPXI_OpenArchive(s_fsPxiHandle, archive, ARCHIVE_SAVEDATA_AND_CONTENT, binPath);
+}
+
+// GBA VC saves are always exposed by FSPXI under this fixed binary path
+// (ported from Checkpoint's fsstream.cpp, which names it pxi_path).
+static const u32 s_rawGbaFilePath[5] = { 1, 1, 3, 0, 0 };
+
+// Matches Checkpoint's SaveDataSource::accessible() for the RawGbaSave
+// case exactly: the archive/file opening cleanly is the whole check. It
+// says nothing about whether a save has actually been written yet (see
+// gba_locate_current_slot() below) -- same as Checkpoint, that's a
+// backup-time failure ("launch the game and save once"), not a listing
+// exclusion, so a title that's never been saved still shows up.
+static bool rawgba_save_accessible(const InstalledTitle *title) {
+    FSPXI_Archive archive;
+    Result rc = open_raw_gba_archive(title, &archive);
+    if (R_FAILED(rc)) return false;
+
+    FSPXI_File file;
+    FS_Path filePath = { PATH_BINARY, sizeof(s_rawGbaFilePath), s_rawGbaFilePath };
+    rc = FSPXI_OpenFile(s_fsPxiHandle, &file, archive, filePath, FS_OPEN_READ, 0);
+    bool ok = R_SUCCEEDED(rc);
+    if (ok) FSPXI_CloseFile(s_fsPxiHandle, file);
+    FSPXI_CloseArchive(s_fsPxiHandle, archive);
+    return ok;
+}
+
+// The AGBSAVE container format (see
+// https://www.3dbrew.org/wiki/3DS_Virtual_Console#NAND_Savegame and
+// Checkpoint's gbasave.cpp, which this is ported from). Only the read side
+// is ported -- locating the current slot and pulling its bare save bytes
+// out -- since this app never writes into a title's live save archive
+// (see download_and_prepare_restore()'s doc comment in main.c); the CMAC
+// re-signing a restore needs is Checkpoint's job, done when the user
+// finishes the restore there. As long as what we hand it is the exact bare
+// save (one of s_gbaValidSaveSizes below, no header), Checkpoint's own
+// restore() recognizes it as such and re-signs it itself.
+typedef struct {
+    u8 magic[4]; // ".SAV"
+    u8 reserved0[0xC];
+    u8 cmac[0x10];
+    u8 reserved1[0x10];
+    u32 unknown0;
+    u32 timesSaved;
+    u64 titleId;
+    u8 sdCid[0x10];
+    u32 saveStart; // always 0x200
+    u32 saveSize;
+    u8 reserved2[0x8];
+    u32 unknown1;
+    u32 unknown2;
+    u8 reserved3[0x198];
+} __attribute__((packed)) AgbSaveHeader;
+_Static_assert(sizeof(AgbSaveHeader) == 0x200, "AgbSaveHeader must be 0x200 bytes");
+
+static const u32 s_gbaValidSaveSizes[] = { 512, 8 * 1024, 32 * 1024, 64 * 1024, 128 * 1024 };
+
+static bool gba_valid_save_size(u32 size) {
+    for (size_t i = 0; i < sizeof(s_gbaValidSaveSizes) / sizeof(s_gbaValidSaveSizes[0]); i++) {
+        if (size == s_gbaValidSaveSizes[i]) return true;
+    }
+    return false;
+}
+
+static bool gba_valid_header(const AgbSaveHeader *hdr) {
+    return memcmp(hdr->magic, ".SAV", 4) == 0 && hdr->saveStart == (u32)sizeof(AgbSaveHeader) &&
+           gba_valid_save_size(hdr->saveSize);
+}
+
+static bool gba_read_header_at(FSPXI_File file, u32 offset, AgbSaveHeader *out) {
+    u32 bytesRead = 0;
+    Result rc = FSPXI_ReadFile(s_fsPxiHandle, file, &bytesRead, offset, out, (u32)sizeof(*out));
+    return R_SUCCEEDED(rc) && bytesRead == (u32)sizeof(*out) && gba_valid_header(out);
+}
+
+// Mirrors Checkpoint's GbaSave::locateCurrentSlot(): the container has two
+// save slots; whichever has the higher timesSaved counter is current (the
+// top slot wins ties). If the top slot has never been written, the bottom
+// slot's own offset depends on its (as yet unknown) save size, so every
+// valid size is tried there instead.
+static bool gba_locate_current_slot(FSPXI_File file, AgbSaveHeader *hdrOut, u32 *slotOffsetOut) {
+    AgbSaveHeader top;
+    if (gba_read_header_at(file, 0, &top)) {
+        AgbSaveHeader bottom;
+        u32 bottomOffset = (u32)sizeof(AgbSaveHeader) + top.saveSize;
+        if (gba_read_header_at(file, bottomOffset, &bottom) && bottom.timesSaved > top.timesSaved) {
+            *hdrOut = bottom;
+            *slotOffsetOut = bottomOffset;
+        } else {
+            *hdrOut = top;
+            *slotOffsetOut = 0;
+        }
+        return true;
+    }
+    for (size_t i = 0; i < sizeof(s_gbaValidSaveSizes) / sizeof(s_gbaValidSaveSizes[0]); i++) {
+        u32 bottomOffset = (u32)sizeof(AgbSaveHeader) + s_gbaValidSaveSizes[i];
+        if (gba_read_header_at(file, bottomOffset, hdrOut)) {
+            *slotOffsetOut = bottomOffset;
+            return true;
+        }
+    }
+    return false;
+}
+
+// saves_backup_title()'s path for title->isRawGbaSave -- a single bare
+// save file instead of walk_and_zip()'s whole-directory-tree dump, since
+// there's nothing else to preserve. "00000001.sav" is the exact filename
+// Checkpoint's own GbaSave::backup() writes and GbaSave::restore() looks
+// for first inside a backup-instance folder (rawBackupFile() in io.cpp),
+// so a Checkpoint-driven restore (see download_and_prepare_restore() in
+// main.c) finds it without any renaming.
+static Result backup_raw_gba_save(const InstalledTitle *title, const char *zipPath) {
+    FSPXI_Archive archive;
+    Result rc = open_raw_gba_archive(title, &archive);
+    if (R_FAILED(rc)) return rc;
+
+    FSPXI_File file;
+    FS_Path filePath = { PATH_BINARY, sizeof(s_rawGbaFilePath), s_rawGbaFilePath };
+    rc = FSPXI_OpenFile(s_fsPxiHandle, &file, archive, filePath, FS_OPEN_READ, 0);
+    if (R_FAILED(rc)) { FSPXI_CloseArchive(s_fsPxiHandle, archive); return rc; }
+
+    AgbSaveHeader hdr;
+    u32 slotOffset = 0;
+    if (!gba_locate_current_slot(file, &hdr, &slotOffset)) {
+        FSPXI_CloseFile(s_fsPxiHandle, file);
+        FSPXI_CloseArchive(s_fsPxiHandle, archive);
+        return -1; // container exists but was never saved to -- launch the game once
+    }
+
+    u8 *buf = malloc(hdr.saveSize);
+    if (!buf) {
+        FSPXI_CloseFile(s_fsPxiHandle, file);
+        FSPXI_CloseArchive(s_fsPxiHandle, archive);
+        return -1;
+    }
+
+    u32 bytesRead = 0;
+    rc = FSPXI_ReadFile(s_fsPxiHandle, file, &bytesRead, slotOffset + (u32)sizeof(AgbSaveHeader), buf, hdr.saveSize);
+    FSPXI_CloseFile(s_fsPxiHandle, file);
+    FSPXI_CloseArchive(s_fsPxiHandle, archive);
+
+    if (R_FAILED(rc) || bytesRead != hdr.saveSize) {
+        free(buf);
+        return R_FAILED(rc) ? rc : -1;
+    }
+
+    ZipWriter *zw = zipw_open(zipPath);
+    if (!zw) { free(buf); return -1; }
+    zipw_add_file(zw, "00000001.sav", buf, hdr.saveSize);
+    zipw_close(zw);
+    free(buf);
+    return 0;
+}
+
 static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr,
                                      u32 *count, u32 *capacity) {
     u32 total = 0;
@@ -117,11 +311,19 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         InstalledTitle candidate;
         candidate.titleId = ids[i];
         candidate.mediaType = mediatype;
-        // savedata_accessible() only needs titleId/mediaType, filled in
-        // above; probe before growing the array or touching the SMDH so a
-        // title that fails the probe costs nothing more than opening and
-        // immediately closing its archive.
-        if (!savedata_accessible(&candidate)) continue;
+        // savedata_accessible()/rawgba_save_accessible() only need
+        // titleId/mediaType, filled in above; probe before growing the
+        // array or touching the SMDH so a title that fails both probes
+        // costs nothing more than opening and immediately closing an
+        // archive. A GBA VC inject fails the normal SAVEDATA probe (its
+        // save isn't there at all -- see the "GBA Virtual Console
+        // injects" section above) but still has a real save reachable
+        // the other way, so it isn't excluded, just flagged.
+        bool isRawGba = false;
+        if (!savedata_accessible(&candidate)) {
+            if (!rawgba_save_accessible(&candidate)) continue;
+            isRawGba = true;
+        }
 
         if (*count == *capacity) {
             u32 newCapacity = (*capacity == 0) ? 16 : (*capacity * 2);
@@ -141,6 +343,7 @@ static Result list_titles_for_media(FS_MediaType mediatype, InstalledTitle **arr
         // product code / a plain placeholder instead.
         title_get_info(ids[i], mediatype, t->name, sizeof(t->name), t->icon);
         t->extdataAccessible = extdata_accessible(ids[i]);
+        t->isRawGbaSave = isRawGba;
         (*count)++;
     }
 
@@ -246,6 +449,8 @@ static Result walk_and_zip(FS_Archive archive, const char *fsDir, const char *zi
 }
 
 Result saves_backup_title(const InstalledTitle *title, const char *zipPath) {
+    if (title->isRawGbaSave) return backup_raw_gba_save(title, zipPath);
+
     FS_Archive archive;
     Result rc = open_title_save_archive(title, &archive);
     if (R_FAILED(rc)) return rc;

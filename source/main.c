@@ -18,6 +18,64 @@
 #define TMP_ZIP_PATH "sdmc:/3ds/Konnect3DS/_tmp_backup.zip"
 #define MAX_LOCAL_BACKUPS 64
 #define MAX_DROPBOX_BACKUPS_SHOWN 32
+#define BACKED_UP_MARKS_PATH "sdmc:/3ds/Konnect3DS/backed_up.txt"
+
+// Which titles have been backed up at least once through this app --
+// live save, extdata, or a Checkpoint instance, any of them count --
+// drives the icon grid's "already backed up" badge (see refresh_visible()
+// and ui_set_home_backup_marks()). Persisted as one hex title id per line
+// so the badges survive an app restart, not just the current session --
+// loaded once at startup (load_backed_up_marks()), appended to on every
+// successful upload (mark_backed_up()).
+static u64 *s_backedUpIds = NULL;
+static u32 s_backedUpCount = 0;
+static u32 s_backedUpCapacity = 0;
+
+static bool is_marked_backed_up(u64 titleId) {
+    for (u32 i = 0; i < s_backedUpCount; i++) {
+        if (s_backedUpIds[i] == titleId) return true;
+    }
+    return false;
+}
+
+static void load_backed_up_marks(void) {
+    FILE *f = fopen(BACKED_UP_MARKS_PATH, "r");
+    if (!f) return; // no marks yet -- fine, every title just starts unbadged
+
+    char line[32];
+    while (fgets(line, sizeof(line), f)) {
+        u64 id = strtoull(line, NULL, 16);
+        if (id == 0) continue;
+
+        if (s_backedUpCount == s_backedUpCapacity) {
+            u32 newCap = s_backedUpCapacity == 0 ? 32 : s_backedUpCapacity * 2;
+            u64 *grown = realloc(s_backedUpIds, sizeof(u64) * newCap);
+            if (!grown) break; // out of memory; keep what's been loaded so far
+            s_backedUpIds = grown;
+            s_backedUpCapacity = newCap;
+        }
+        s_backedUpIds[s_backedUpCount++] = id;
+    }
+    fclose(f);
+}
+
+static void mark_backed_up(u64 titleId) {
+    if (is_marked_backed_up(titleId)) return;
+
+    if (s_backedUpCount == s_backedUpCapacity) {
+        u32 newCap = s_backedUpCapacity == 0 ? 32 : s_backedUpCapacity * 2;
+        u64 *grown = realloc(s_backedUpIds, sizeof(u64) * newCap);
+        if (!grown) return; // out of memory; badge just won't show for this one
+        s_backedUpIds = grown;
+        s_backedUpCapacity = newCap;
+    }
+    s_backedUpIds[s_backedUpCount++] = titleId;
+
+    FILE *f = fopen(BACKED_UP_MARKS_PATH, "a");
+    if (!f) return;
+    fprintf(f, "%016llX\n", (unsigned long long)titleId);
+    fclose(f);
+}
 
 // CHECKPOINT_SAVES_DIR (checkpoint_saves.h) is also used below as the
 // folder picker's starting point when it exists, so picking up an
@@ -28,6 +86,17 @@ typedef struct {
     InstalledTitle *titles;
     u32 titleCount;
     bool loggedIn;
+    // SELECT toggles this (UI_GRID_TOGGLE_EXTDATA) to show only titles
+    // with a backable extra-data save instead of every title -- lets
+    // e.g. every Pokemon game be found at a glance instead of scrolling
+    // past everything else. `visible` holds the indices into `titles`
+    // the grid is currently showing (every index, in order, when the
+    // filter is off); refresh_visible() rebuilds it after refresh_titles()
+    // and whenever the filter is toggled.
+    bool extdataFilterOn;
+    u32 *visible;
+    u32 visibleCount;
+    u32 visibleCapacity;
 } MenuState;
 
 static const char *title_display_name(const InstalledTitle *t) {
@@ -36,7 +105,7 @@ static const char *title_display_name(const InstalledTitle *t) {
 
 // ui_run_icon_grid()'s caption callback: index 0 is always its reserved
 // folder/import tile, 1..N line up with title_icon_pixels() below (same
-// state->titles indexing, offset by 1). The physical game card slot can
+// state->visible indexing, offset by 1). The physical game card slot can
 // only ever hold one title at a time and is easy to mix up with an
 // SD-installed game sharing a similar name, so it's flagged in the
 // caption -- display-only (a static scratch buffer, safe since only one
@@ -47,7 +116,7 @@ static const char *grid_label(int index, void *userdata) {
     const MenuState *state = (const MenuState *)userdata;
     if (index == 0) return "Import from SD/3DS folder";
 
-    const InstalledTitle *t = &state->titles[index - 1];
+    const InstalledTitle *t = &state->titles[state->visible[index - 1]];
     const char *name = title_display_name(t);
     if (t->mediaType != MEDIATYPE_GAME_CARD) return name;
 
@@ -58,7 +127,46 @@ static const char *grid_label(int index, void *userdata) {
 
 static const u16 *title_icon_pixels(int index, void *userdata) {
     const MenuState *state = (const MenuState *)userdata;
-    return state->titles[index].icon;
+    return state->titles[state->visible[index]].icon;
+}
+
+// Rebuilds state->visible from state->titles/titleCount and the current
+// extdataFilterOn setting, then hands the result to ui_set_home_icons().
+// Called after every refresh_titles() and whenever SELECT toggles the
+// filter -- titleCount is also visible's upper bound on how large it'll
+// ever need to be, so the backing array only grows, never shrinks.
+static void refresh_visible(MenuState *state) {
+    if (state->visibleCapacity < state->titleCount) {
+        u32 *grown = realloc(state->visible, sizeof(u32) * state->titleCount);
+        if (!grown) return; // out of memory; keep showing the previous list
+        state->visible = grown;
+        state->visibleCapacity = state->titleCount;
+    }
+
+    state->visibleCount = 0;
+    for (u32 i = 0; i < state->titleCount; i++) {
+        if (state->extdataFilterOn && !state->titles[i].extdataAccessible) continue;
+        state->visible[state->visibleCount++] = i;
+    }
+
+    ui_set_home_icons((int)state->visibleCount, title_icon_pixels, state);
+
+    // Aligned with title_icon_pixels()' own indexing (state->visible[i]) --
+    // rebuilt fresh here rather than cached, so it always reflects which
+    // titles are visible right now, not whichever were visible the last
+    // time the filter changed.
+    if (state->visibleCount > 0) {
+        bool *marks = malloc(sizeof(bool) * state->visibleCount);
+        if (marks) {
+            for (u32 i = 0; i < state->visibleCount; i++) {
+                marks[i] = is_marked_backed_up(state->titles[state->visible[i]].titleId);
+            }
+            ui_set_home_backup_marks(marks, (int)state->visibleCount);
+            free(marks);
+        }
+    } else {
+        ui_set_home_backup_marks(NULL, 0);
+    }
 }
 
 static void refresh_titles(MenuState *state) {
@@ -66,7 +174,7 @@ static void refresh_titles(MenuState *state) {
     state->titles = NULL;
     state->titleCount = 0;
     saves_list_titles(&state->titles, &state->titleCount);
-    ui_set_home_icons((int)state->titleCount, title_icon_pixels, state);
+    refresh_visible(state);
 }
 
 // Best-effort: leaves the header's email blank on failure (network error,
@@ -227,6 +335,7 @@ static void upload_local_backup(MenuState *state, DropboxTokens *tokens, int tit
     remove(TMP_ZIP_PATH);
 
     if (ok) {
+        mark_backed_up(t->titleId);
         char msg[224];
         snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
         ui_print_success(msg);
@@ -439,6 +548,7 @@ static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
 
         if (ok) {
             okCount++;
+            mark_backed_up(t->titleId);
         } else {
             failCount++;
             size_t used = strlen(failedNames);
@@ -622,6 +732,7 @@ int main(void) {
 
     mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
     mkdir("sdmc:/3ds/Konnect3DS", 0777);
+    load_backed_up_marks();
 
     DropboxTokens tokens;
     MenuState state = {0};
@@ -672,13 +783,28 @@ int main(void) {
                 continue;
             }
 
+            if (choice == UI_GRID_TOGGLE_EXTDATA) {
+                state.extdataFilterOn = !state.extdataFilterOn;
+                refresh_visible(&state);
+                ui_clear();
+                ui_print(state.extdataFilterOn
+                    ? "Mostrando so jogos com dados extras.\n"
+                    : "Mostrando todos os jogos.\n");
+                ui_flush();
+                ui_wait_briefly(90);
+                continue;
+            }
+
             if (choice == 0) {
                 import_and_upload(&tokens);
                 refresh_titles(&state);
                 continue;
             }
 
-            int titleIndex = choice - 1;
+            // choice is an index into state.visible (1..visibleCount), not
+            // state.titles directly -- state.visible[] is what maps back to
+            // a real title when the extdata filter (SELECT) has hidden some.
+            int titleIndex = (int)state.visible[choice - 1];
             show_game_detail(&state, &tokens, titleIndex);
             // Picks up newly-created Checkpoint backups and any title
             // list changes (cart swap, freshly installed game) each time
@@ -690,6 +816,7 @@ int main(void) {
     }
 
     if (state.titles) free(state.titles);
+    if (state.visible) free(state.visible);
     http_exit();
     ui_exit();
     romfsExit();

@@ -94,6 +94,14 @@ static const Tex3DS_SubTexture s_titleIconSubtex = {
 static C3D_Tex *s_titleIconTex;
 static bool *s_titleIconValid;
 static int s_titleIconCount;
+// Per-title "has this been backed up before" flag (see
+// ui_set_home_backup_marks()), drawn as a small badge over the tile in
+// draw_icon_grid() -- a separate array/setter from the icon textures
+// above so main.c can refresh just this (cheap: no re-reading any SMDH,
+// no texture rebuild) whenever a backup completes, without redoing the
+// icon textures too.
+static bool *s_titleBackedUp;
+static int s_titleBackedUpCount;
 
 static u32 COLOR_BG;
 static u32 COLOR_TEXT;
@@ -216,6 +224,22 @@ void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata) 
         }
         s_titleIconValid[i] = true;
     }
+}
+
+// Sets which title indices (same indexing as ui_set_home_icons()) get a
+// "backed up before" badge drawn over their tile -- see draw_icon_grid().
+// Independent from the icon textures themselves so main.c can refresh
+// just this after a backup completes, without rebuilding every texture.
+void ui_set_home_backup_marks(const bool *marks, int count) {
+    free(s_titleBackedUp);
+    s_titleBackedUp = NULL;
+    s_titleBackedUpCount = 0;
+    if (count <= 0 || !marks) return;
+
+    s_titleBackedUp = malloc(sizeof(bool) * (size_t)count);
+    if (!s_titleBackedUp) return;
+    memcpy(s_titleBackedUp, marks, sizeof(bool) * (size_t)count);
+    s_titleBackedUpCount = count;
 }
 
 // Every piece of text in this file goes through here so "bold" means one
@@ -358,6 +382,17 @@ static void draw_icon_grid(void) {
         } else {
             C2D_DrawRectSolid(x, y, 0.0f, ICON_TILE_SIZE, ICON_TILE_SIZE, COLOR_MUTED);
         }
+
+        // "Already backed up before" badge: a small filled dot over the
+        // tile's top-right corner, on top of whatever was just drawn (icon
+        // or placeholder) -- see ui_set_home_backup_marks(). A white ring
+        // behind it keeps it visible over any icon color underneath.
+        if (titleIdx < s_titleBackedUpCount && s_titleBackedUp[titleIdx]) {
+            float bx = x + ICON_TILE_SIZE - 3.0f;
+            float by = y + 3.0f;
+            C2D_DrawCircleSolid(bx, by, 0.0f, 6.0f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+            C2D_DrawCircleSolid(bx, by, 0.0f, 4.0f, COLOR_SUCCESS);
+        }
     }
 
     if (s_grid.scrollRow > 0) {
@@ -422,6 +457,9 @@ void ui_init(void) {
 
 void ui_exit(void) {
     free_home_icons();
+    free(s_titleBackedUp);
+    s_titleBackedUp = NULL;
+    s_titleBackedUpCount = 0;
     if (s_folderIconLoaded) C2D_SpriteSheetFree(s_folderIconSheet);
     if (s_bgLoaded) C2D_SpriteSheetFree(s_bgSheet);
     C2D_TextBufDelete(s_textBuf);
@@ -546,7 +584,7 @@ static void draw_confirm(void) {
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A = yes    B = no", false);
 }
 
-#define GRID_FOOTER_LINES 6
+#define GRID_FOOTER_LINES 7
 
 // The icon grid's bottom screen: fixed control hints, anchored to the
 // bottom of the screen (a footer) rather than the top -- there's nothing
@@ -560,6 +598,7 @@ static void draw_grid_bottom_footer(void) {
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "A: abrir", false); y += LINE_HEIGHT;
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "X: gerenciar conta", false); y += LINE_HEIGHT;
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Y: backup de tudo", false); y += LINE_HEIGHT;
+    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "SELECT: so com dados extras", false); y += LINE_HEIGHT;
     draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "START: sair do app", false);
 }
 
@@ -747,8 +786,9 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
             } else if (kDown & KEY_A) { result = s_grid.selected; goto done; }
             else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
             else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
-            else if (kDown & (KEY_X | KEY_SELECT)) { result = UI_GRID_ACCOUNT; goto done; }
+            else if (kDown & KEY_X) { result = UI_GRID_ACCOUNT; goto done; }
             else if (kDown & KEY_Y) { result = UI_GRID_BACKUP_ALL; goto done; }
+            else if (kDown & KEY_SELECT) { result = UI_GRID_TOGGLE_EXTDATA; goto done; }
             else gspWaitForVBlank();
         }
     }

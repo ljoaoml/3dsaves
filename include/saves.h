@@ -20,21 +20,37 @@ typedef struct {
     // (see saves_list_titles()); extdata is an optional *additional* thing
     // to back up, checked with saves_backup_title_extdata().
     bool extdataAccessible;
+    // True if this title's save doesn't live in the normal SAVEDATA
+    // archive at all -- some GBA Virtual Console injects (forwarder CIAs
+    // made with tools like Brewtendo, or converted from a .3dsx/CIA) only
+    // expose their save through a separate raw archive reached via the
+    // PxiFS0 service (see saves.c's "GBA Virtual Console injects"
+    // section). saves_backup_title() checks this to pick the right one of
+    // two completely different backup paths.
+    bool isRawGbaSave;
 } InstalledTitle;
 
 // Lists installed titles (SD + inserted cartridge) that are both regular
 // applications (0x00040000 category, minus a short list of known non-game
 // system titles -- Instruction Manual, Internet Browser, title updates,
-// DSi data archives) AND whose SAVEDATA archive actually opens -- the same
-// two-part filter Checkpoint uses (TitleQuirks::isSystemExcluded() +
+// DSi data archives) AND have an accessible save -- the same two-part
+// filter Checkpoint uses (TitleQuirks::isSystemExcluded() +
 // SaveDataSource::accessible()), category alone isn't a reliable "this is
-// a game" signal since plenty of non-game system titles share it too.
-// Caller must free() the returned array.
+// a game" signal since plenty of non-game system titles share it too. A
+// title whose SAVEDATA archive doesn't open is still included if it turns
+// out to be a GBA Virtual Console inject with a save reachable the other
+// way (see InstalledTitle.isRawGbaSave) -- so this is really "accessible
+// via *some* save path", not strictly SAVEDATA. Caller must free() the
+// returned array.
 Result saves_list_titles(InstalledTitle **out, u32 *count);
 
-// Opens `title`'s SAVEDATA archive and writes every file in it into a new
-// zip at `zipPath` on SD, preserving the directory structure. Returns 0 on
-// success (even for an empty save), or a libctru Result on failure.
+// Backs up `title`'s save into a new zip at `zipPath` on SD: every file in
+// its SAVEDATA archive preserving the directory structure, or (when
+// title->isRawGbaSave) the one bare save file pulled out of a GBA Virtual
+// Console inject's raw save container. Returns 0 on success (even for an
+// empty SAVEDATA save), or a nonzero Result on failure -- including, for a
+// raw GBA save, the container existing but never having been saved to yet
+// (the game needs to be launched and saved once first).
 Result saves_backup_title(const InstalledTitle *title, const char *zipPath);
 
 // Same as saves_backup_title(), but for `title`'s EXTDATA archive instead

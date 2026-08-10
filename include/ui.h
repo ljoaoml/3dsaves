@@ -83,6 +83,15 @@ void ui_print_header_bottom(const char *title);
 typedef const u16 *(*ui_icon_pixels_fn)(int index, void *userdata);
 void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata);
 
+// Marks which of the same title indices as ui_set_home_icons() get a
+// small "backed up before" badge drawn over their tile in the icon grid.
+// `marks` is copied immediately (not referenced afterward), so a stack
+// array is fine; `count` should match the most recent ui_set_home_icons()
+// call. Deliberately separate from ui_set_home_icons() so main.c can
+// refresh just this (cheap) right after a backup completes, without
+// rebuilding every icon texture too.
+void ui_set_home_backup_marks(const bool *marks, int count);
+
 // Sets (copies in) the account email shown at the top-right of the icon
 // grid's header bar. NULL or "" clears it (shown logged-out/unknown).
 void ui_set_account_email(const char *email);
@@ -109,17 +118,20 @@ bool ui_is_email_hidden(void);
 // both clamp at the top/bottom instead of wrapping (see ui.c for why). A
 // confirms, returning the highlighted tile's index (0 = folder/import,
 // 1..N = title index N-1). B returns UI_GRID_CANCEL, START returns
-// UI_GRID_EXIT, X or SELECT returns UI_GRID_ACCOUNT (X is the primary
-// account-menu button -- there's a small person icon in the header as a
-// visual reminder, but it isn't independently selectable, just a hint
-// that X does something there; SELECT still works too), Y returns
-// UI_GRID_BACKUP_ALL (back up every listed title's live save in one go)
-// -- main.c tells all of these apart from a real tile pick since none of
-// them are valid indices.
-#define UI_GRID_CANCEL     (-1)
-#define UI_GRID_EXIT       (-2)
-#define UI_GRID_ACCOUNT    (-3)
-#define UI_GRID_BACKUP_ALL (-4)
+// UI_GRID_EXIT, X returns UI_GRID_ACCOUNT (there's a small person icon in
+// the header as a visual reminder, but it isn't independently selectable,
+// just a hint that X does something there), Y returns UI_GRID_BACKUP_ALL
+// (back up every listed title's live save in one go), SELECT returns
+// UI_GRID_TOGGLE_EXTDATA (show only titles with a backable extra-data
+// save, or go back to showing all of them -- main.c owns which titles
+// that actually is, this just reports the key press) -- main.c tells all
+// of these apart from a real tile pick since none of them are valid
+// indices.
+#define UI_GRID_CANCEL          (-1)
+#define UI_GRID_EXIT            (-2)
+#define UI_GRID_ACCOUNT         (-3)
+#define UI_GRID_BACKUP_ALL      (-4)
+#define UI_GRID_TOGGLE_EXTDATA  (-5)
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata);
 
 // Big centered "Log in to Dropbox" prompt, shown before the icon grid the
