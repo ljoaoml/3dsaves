@@ -47,7 +47,11 @@
 // the grid is active, not a decorative header strip -- it starts right
 // below the header bar and a caption line for the highlighted item's name
 // is reserved below the tiles.
-#define ICON_TILE_SIZE 56.0f
+// 48px = the SMDH icon's own native size -- drawing at exactly that
+// (rather than upscaling) avoids the blocky/stretched look nearest-
+// neighbor upscaling gave it; C3D_TexSetFilter(GPU_LINEAR) below still
+// smooths any remaining sub-pixel scaling.
+#define ICON_TILE_SIZE 48.0f
 #define ICON_TILE_GAP 14.0f
 #define ICON_GRID_Y (HEADER_BAR_HEIGHT + 10.0f)
 #define ICON_CAPTION_HEIGHT 22.0f
@@ -191,6 +195,11 @@ void ui_set_home_icons(int count, ui_icon_pixels_fn get_pixels, void *userdata) 
         const u16 *pixels = get_pixels ? get_pixels(i, userdata) : NULL;
         if (!pixels) continue;
         if (!C3D_TexInit(&s_titleIconTex[i], 64, 64, GPU_RGB565)) continue;
+        // Bilinear, not the default nearest -- Checkpoint's own
+        // IconStore::realize() sets this for the same reason: without it,
+        // any non-1:1 scaling of the icon (even the sub-pixel kind from
+        // ICON_TILE_SIZE not landing exactly on integers) looks blocky.
+        C3D_TexSetFilter(&s_titleIconTex[i], GPU_LINEAR, GPU_LINEAR);
 
         // Same top-left-anchored 48x48-in-64x64 tile copy as
         // s_titleIconSubtex describes -- see its comment. No de-swizzling
@@ -233,14 +242,35 @@ void ui_set_account_email(const char *email) {
     else s_accountEmail[0] = '\0';
 }
 
+// No asset for this (unlike the background/folder icon) -- a plain
+// circle head + trapezoid shoulders, just enough to read as "account"
+// at header size. Purely a visual affordance; X (see ui_run_icon_grid())
+// opens the actual logout confirmation from anywhere, not just by
+// "pressing" this icon (there's no touch input in this app at all).
+static void draw_person_icon(float cx, float cy, float scale, u32 color) {
+    C2D_DrawCircleSolid(cx, cy - 3.5f * scale, 0.0f, 2.6f * scale, color);
+    C2D_DrawTriangle(cx - 4.5f * scale, cy + 5.0f * scale, color,
+                      cx + 4.5f * scale, cy + 5.0f * scale, color,
+                      cx - 2.6f * scale, cy - 0.5f * scale, color, 0.0f);
+    C2D_DrawTriangle(cx + 4.5f * scale, cy + 5.0f * scale, color,
+                      cx + 2.6f * scale, cy - 0.5f * scale, color,
+                      cx - 2.6f * scale, cy - 0.5f * scale, color, 0.0f);
+}
+
 // "KONNECT3DS" at the left, the logged-in account's email at the right
 // (blank if logged out, or before ui_set_account_email() has been told
-// otherwise), a rule underneath -- the top screen's persistent header
-// while the icon grid is showing.
+// otherwise) next to a small person icon (X opens account/logout -- see
+// ui_run_icon_grid()), a rule underneath -- the top screen's persistent
+// header while the icon grid is showing.
 static void draw_top_header(void) {
     draw_text(MARGIN_X, 6.0f, HEADER_TEXT_SCALE, COLOR_ACCENT, "KONNECT3DS", true);
+    // The person icon (X = account/logout) only makes sense once there's
+    // an account linked -- s_accountEmail is empty until then, so it
+    // doubles as the "are we logged in" signal here rather than adding a
+    // separate bool the two call sites would have to keep in sync.
     if (s_accountEmail[0]) {
-        draw_text_aligned(TOP_W - MARGIN_X, 8.0f, TEXT_SCALE, COLOR_ACCENT, s_accountEmail, true, C2D_AlignRight);
+        draw_person_icon(TOP_W - MARGIN_X - 8.0f, 15.0f, 1.3f, COLOR_ACCENT);
+        draw_text_aligned(TOP_W - MARGIN_X - 24.0f, 8.0f, TEXT_SCALE, COLOR_ACCENT, s_accountEmail, true, C2D_AlignRight);
     }
     C2D_DrawRectSolid(MARGIN_X, HEADER_BAR_HEIGHT - 4.0f, 0.0f, TOP_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
 }
@@ -254,6 +284,22 @@ static int grid_visible_rows(void) {
     float availH = TOP_H - ICON_GRID_Y - ICON_CAPTION_HEIGHT - MARGIN_Y;
     int rows = (int)((availH + ICON_TILE_GAP) / (ICON_TILE_SIZE + ICON_TILE_GAP));
     return rows < 1 ? 1 : rows;
+}
+
+static int grid_total_rows(void) {
+    return (s_grid.count + s_grid.cols - 1) / s_grid.cols;
+}
+
+// A small solid triangle pointing up or down, at the grid's right edge --
+// scroll indicators for when Up/Down/L/R (see ui_run_icon_grid()) have
+// more rows to reach than currently fit on screen.
+static void draw_scroll_caret(float cy, bool pointsUp, u32 color) {
+    float x = TOP_W - MARGIN_X - 6.0f;
+    if (pointsUp) {
+        C2D_DrawTriangle(x - 6.0f, cy + 4.0f, color, x + 6.0f, cy + 4.0f, color, x, cy - 4.0f, color, 0.0f);
+    } else {
+        C2D_DrawTriangle(x - 6.0f, cy - 4.0f, color, x + 6.0f, cy - 4.0f, color, x, cy + 4.0f, color, 0.0f);
+    }
 }
 
 // The icon grid itself: tile 0 is always the reserved folder/import tile,
@@ -300,6 +346,13 @@ static void draw_icon_grid(void) {
         }
     }
 
+    if (s_grid.scrollRow > 0) {
+        draw_scroll_caret(ICON_GRID_Y - 6.0f, true, COLOR_ACCENT);
+    }
+    if (s_grid.scrollRow + visibleRows < grid_total_rows()) {
+        draw_scroll_caret(ICON_GRID_Y + visibleRows * step - ICON_TILE_GAP * 0.5f, false, COLOR_ACCENT);
+    }
+
     if (s_grid.getLabel) {
         const char *caption = s_grid.getLabel(s_grid.selected, s_grid.userdata);
         if (caption) {
@@ -327,7 +380,12 @@ void ui_init(void) {
 
     s_folderIconSheet = C2D_SpriteSheetLoad("romfs:/gfx/folder_icon.t3x");
     s_folderIconLoaded = s_folderIconSheet != NULL;
-    if (s_folderIconLoaded) s_folderIcon = C2D_SpriteSheetGetImage(s_folderIconSheet, 0);
+    if (s_folderIconLoaded) {
+        s_folderIcon = C2D_SpriteSheetGetImage(s_folderIconSheet, 0);
+        // Drawn well below its native resolution (grid tile size vs. the
+        // source PNG) -- linear filtering avoids aliasing on that downscale.
+        C3D_TexSetFilter(s_folderIcon.tex, GPU_LINEAR, GPU_LINEAR);
+    }
 
     // #5854C1 -- the exact purple from the mockup/folder icon asset (its
     // source file was literally named "#5854c1.png") -- as the one accent
@@ -362,11 +420,19 @@ void ui_exit(void) {
 // target -- slight aspect distortion (400x240 top vs 320x240 bottom, vs.
 // the source image's own aspect ratio) is an acceptable tradeoff for
 // "always fills the screen with no letterboxing" over pixel-perfect aspect.
-static void draw_background(float screenW, float screenH) {
+// flipVertical mirrors it top-to-bottom (negative scaleY, anchored at the
+// bottom edge instead of the top) -- the mockup's bottom-screen background
+// was vertically flipped so its diagonal reads as a continuation of the
+// top screen's rather than a plain repeat of it.
+static void draw_background(float screenW, float screenH, bool flipVertical) {
     if (!s_bgLoaded) return;
     float scaleX = screenW / s_bgImage.subtex->width;
     float scaleY = screenH / s_bgImage.subtex->height;
-    C2D_DrawImageAt(s_bgImage, 0.0f, 0.0f, 0.0f, NULL, scaleX, scaleY);
+    if (flipVertical) {
+        C2D_DrawImageAt(s_bgImage, 0.0f, screenH, 0.0f, NULL, scaleX, -scaleY);
+    } else {
+        C2D_DrawImageAt(s_bgImage, 0.0f, 0.0f, 0.0f, NULL, scaleX, scaleY);
+    }
 }
 
 static void log_append_line(LogLine *lines, int *count, const char *text, u32 color, LogKind kind, bool bold) {
@@ -475,7 +541,7 @@ static void present(ui_top_draw_fn drawTop, void *topUserdata) {
 
     C2D_TargetClear(s_top, COLOR_BG);
     C2D_SceneBegin(s_top);
-    draw_background(TOP_W, TOP_H);
+    draw_background(TOP_W, TOP_H, false);
     if (drawTop) {
         drawTop(topUserdata);
     } else if (s_topMode == TOP_GRID) {
@@ -487,7 +553,7 @@ static void present(ui_top_draw_fn drawTop, void *topUserdata) {
 
     C2D_TargetClear(s_bottom, COLOR_BG);
     C2D_SceneBegin(s_bottom);
-    draw_background(BOTTOM_W, BOTTOM_H);
+    draw_background(BOTTOM_W, BOTTOM_H, true);
     switch (s_bottomMode) {
         case BOTTOM_MENU:    draw_menu(); break;
         case BOTTOM_CONFIRM: draw_confirm(); break;
@@ -600,6 +666,18 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
     s_grid.userdata = userdata;
     s_topMode = TOP_GRID;
 
+    // The bottom screen has nothing else to show while the grid runs (see
+    // ui_run_icon_grid()'s doc comment) -- put the controls here instead
+    // of leaving it blank. Plain BOTTOM_LOG content, so this needs no new
+    // rendering path of its own.
+    ui_clear_bottom();
+    ui_print_header_bottom("Controles");
+    ui_print_bottom("Direcional: navegar\n");
+    ui_print_bottom("L / R: pular de pagina\n");
+    ui_print_bottom("A: abrir\n");
+    ui_print_bottom("X: conta (logout)\n");
+    ui_print_bottom("START: sair do app\n");
+
     int visibleRows = grid_visible_rows();
     int result;
 
@@ -631,10 +709,22 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
             } else if (kDown & KEY_UP) {
                 int next = s_grid.selected - s_grid.cols;
                 if (next >= 0) { s_grid.selected = next; decided = true; }
+            } else if (kDown & KEY_R) {
+                // Fast-scroll a full page (Checkpoint's own convention:
+                // DPAD moves one at a time, L/R jump further) -- clamped
+                // to the last tile rather than wrapping, same reasoning
+                // as Up/Down above.
+                int next = s_grid.selected + visibleRows * s_grid.cols;
+                s_grid.selected = next < s_grid.count ? next : s_grid.count - 1;
+                decided = true;
+            } else if (kDown & KEY_L) {
+                int next = s_grid.selected - visibleRows * s_grid.cols;
+                s_grid.selected = next >= 0 ? next : 0;
+                decided = true;
             } else if (kDown & KEY_A) { result = s_grid.selected; goto done; }
             else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
             else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
-            else if (kDown & KEY_SELECT) { result = UI_GRID_LOGOUT; goto done; }
+            else if (kDown & (KEY_X | KEY_SELECT)) { result = UI_GRID_LOGOUT; goto done; }
             else gspWaitForVBlank();
         }
     }
@@ -656,7 +746,7 @@ bool ui_run_login_gate(void) {
 
         C2D_TargetClear(s_top, COLOR_BG);
         C2D_SceneBegin(s_top);
-        draw_background(TOP_W, TOP_H);
+        draw_background(TOP_W, TOP_H, false);
         draw_top_header();
         draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f - 30.0f, 0.9f, COLOR_ACCENT,
                            "Fazer login no Dropbox", true, C2D_AlignCenter);
@@ -665,7 +755,7 @@ bool ui_run_login_gate(void) {
 
         C2D_TargetClear(s_bottom, COLOR_BG);
         C2D_SceneBegin(s_bottom);
-        draw_background(BOTTOM_W, BOTTOM_H);
+        draw_background(BOTTOM_W, BOTTOM_H, true);
         draw_text_aligned(BOTTOM_W / 2.0f, BOTTOM_H / 2.0f, TEXT_SCALE, COLOR_MUTED,
                            "A = login    START = sair", false, C2D_AlignCenter);
 
@@ -675,6 +765,16 @@ bool ui_run_login_gate(void) {
         u32 kDown = hidKeysDown();
         if (kDown & KEY_A) return true;
         if (kDown & KEY_START) return false;
+        gspWaitForVBlank();
+    }
+}
+
+void ui_wait_briefly(int frames) {
+    ui_flush();
+    for (int i = 0; i < frames; i++) {
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        if (kDown & (KEY_A | KEY_B | KEY_START)) break; // still skippable, just not required
         gspWaitForVBlank();
     }
 }

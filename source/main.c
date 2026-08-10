@@ -355,7 +355,7 @@ static void run_startup_diagnostics(void) {
     // client.
     selftest_https("api.dropboxapi.com", "https://api.dropboxapi.com/");
     selftest_https("example.com (control)", "https://example.com/");
-    ui_wait_for_a();
+    ui_wait_briefly(180); // ~3s at 60fps, or skip immediately with A/B/START
 }
 
 int main(void) {

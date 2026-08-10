@@ -46,6 +46,12 @@ bool ui_confirm(const char *prompt);
 // Blocks until any of KEY_A/KEY_B/KEY_START is pressed (for "press A to continue" screens).
 void ui_wait_for_a(void);
 
+// Like ui_wait_for_a(), but auto-continues after `frames` vblanks (~1/60s
+// each) if nothing is pressed first -- for informational screens (e.g.
+// startup diagnostics) that shouldn't block progress on a confirmation
+// nobody needs to give.
+void ui_wait_briefly(int frames);
+
 // Top-screen status lines with color (green/red), for reporting an
 // operation's outcome without cluttering ui_print's plain-text callers.
 void ui_print_success(const char *text);
@@ -90,10 +96,14 @@ void ui_set_account_email(const char *email);
 // whichever tile is currently highlighted.
 //
 // Left/Right move the highlight and wrap around the whole grid; Up/Down
-// move a full row and clamp at the top/bottom instead of wrapping (see
-// ui.c for why). A confirms, returning the highlighted tile's index (0 =
-// folder/import, 1..N = title index N-1). B returns UI_GRID_CANCEL, START
-// returns UI_GRID_EXIT, SELECT returns UI_GRID_LOGOUT -- main.c tells
+// move a full row, and L/R move a full page (visible rows' worth) --
+// both clamp at the top/bottom instead of wrapping (see ui.c for why). A
+// confirms, returning the highlighted tile's index (0 = folder/import,
+// 1..N = title index N-1). B returns UI_GRID_CANCEL, START returns
+// UI_GRID_EXIT, X or SELECT returns UI_GRID_LOGOUT (X is the primary
+// account/logout button -- there's a small person icon in the header as
+// a visual reminder, but it isn't independently selectable, just a hint
+// that X does something there; SELECT still works too) -- main.c tells
 // these apart from a real tile pick since none of them are valid indices.
 #define UI_GRID_CANCEL (-1)
 #define UI_GRID_EXIT   (-2)
