@@ -276,9 +276,22 @@ void ui_set_account_email(const char *email) {
 // Privacy toggle for the header's email (see show_account_menu() in
 // main.c) -- purely a display concern, doesn't touch s_accountEmail
 // itself, so toggling it back shows the real address again with no
-// re-fetch needed.
+// re-fetch needed. Persisted as a flag file's mere existence (no content
+// to parse, just presence/absence) so the choice survives an app restart
+// instead of silently resetting to "shown" every launch -- loaded once in
+// ui_init(), (re)written on every toggle.
+#define EMAIL_HIDDEN_FLAG_PATH "sdmc:/3ds/Konnect3DS/email_hidden.flag"
 static bool s_emailHidden = false;
-void ui_toggle_email_visibility(void) { s_emailHidden = !s_emailHidden; }
+
+void ui_toggle_email_visibility(void) {
+    s_emailHidden = !s_emailHidden;
+    if (s_emailHidden) {
+        FILE *f = fopen(EMAIL_HIDDEN_FLAG_PATH, "wb");
+        if (f) fclose(f);
+    } else {
+        remove(EMAIL_HIDDEN_FLAG_PATH);
+    }
+}
 bool ui_is_email_hidden(void) { return s_emailHidden; }
 
 // No asset for this (unlike the background/folder icon) -- a plain
@@ -447,6 +460,15 @@ void ui_init(void) {
         // Drawn well below its native resolution (grid tile size vs. the
         // source PNG) -- linear filtering avoids aliasing on that downscale.
         C3D_TexSetFilter(s_folderIcon.tex, GPU_LINEAR, GPU_LINEAR);
+    }
+
+    // Restores the "hide email" preference from a previous run (see
+    // EMAIL_HIDDEN_FLAG_PATH's comment) -- safe to check before main()'s
+    // own mkdir("sdmc:/3ds/Konnect3DS", ...) has run: a missing folder
+    // just means fopen() returns NULL here, same as a missing file would.
+    {
+        FILE *f = fopen(EMAIL_HIDDEN_FLAG_PATH, "rb");
+        if (f) { s_emailHidden = true; fclose(f); }
     }
 
     // #5854C1 -- the exact purple from the mockup/folder icon asset (its
