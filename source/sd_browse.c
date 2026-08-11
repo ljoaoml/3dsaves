@@ -42,6 +42,12 @@ static void free_listing(BrowseCtx *ctx) {
     ctx->count = 0;
 }
 
+static int compare_names(const void *a, const void *b) {
+    const char *const *sa = (const char *const *)a;
+    const char *const *sb = (const char *const *)b;
+    return strcmp(*sa, *sb);
+}
+
 static bool list_subfolders(const char *dir, BrowseCtx *ctx) {
     free_listing(ctx);
 
@@ -68,6 +74,11 @@ static bool list_subfolders(const char *dir, BrowseCtx *ctx) {
         if (ctx->names[ctx->count]) ctx->count++;
     }
     closedir(d);
+
+    // readdir() order is raw filesystem order (arbitrary on FAT/exFAT),
+    // not alphabetical -- sort so navigating a folder with many
+    // subfolders is actually predictable.
+    if (ctx->count > 0) qsort(ctx->names, ctx->count, sizeof(char *), compare_names);
     return true;
 }
 

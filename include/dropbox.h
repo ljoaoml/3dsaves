@@ -22,29 +22,23 @@ bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
                           const char *dropboxPath, HttpProgressFn onProgress, void *progressUserdata,
                           char *errorOut, size_t errorOutSize);
 
-// Builds "/Konnect3DS/<sanitized name>/<sanitized name>.zip" into `out`.
-// `name` is typically a game's title (from its SMDH) or a product code --
-// neither is guaranteed safe as a Dropbox path component (titles can
-// contain ':', '/', etc.), so this sanitizes first. See dropbox.c for the
-// exact character rules.
-void dropbox_build_game_path(const char *name, char *out, size_t outSize);
-
 // Builds "/Konnect3DS/<sanitized name>" (no trailing slash) into `out` --
 // the per-game folder that holds every backup uploaded for that game, one
 // zip per backup instance (see dropbox_build_backup_path()).
 void dropbox_build_game_folder(const char *name, char *out, size_t outSize);
 
 // Builds "/Konnect3DS/<sanitized name>/<sanitized label>.zip" into `out`.
-// Unlike dropbox_build_game_path()'s single fixed filename (always
-// overwritten), `label` identifies one specific backup instance (e.g. a
-// Checkpoint backup folder's own name, or a generated timestamp for a
-// live-save backup) so multiple backups for the same game coexist as
-// separate files instead of clobbering each other.
+// `label` identifies one specific backup instance (e.g. a Checkpoint
+// backup folder's own name, or a generated timestamp for a live-save
+// backup) so multiple backups for the same game coexist as separate files
+// instead of clobbering each other -- every upload path in this app uses
+// this, none use a single fixed filename anymore.
 void dropbox_build_backup_path(const char *name, const char *label, char *out, size_t outSize);
 
 typedef struct {
-    char name[128]; // file name only (e.g. "20260810-153000.zip"), not a full path
-    long size;      // bytes, -1 if Dropbox didn't report one
+    char name[128];   // file name only (e.g. "20260810-153000.zip"), not a full path
+    long size;        // bytes, -1 if Dropbox didn't report one
+    char modified[11]; // "YYYY-MM-DD" (truncated from Dropbox's server_modified), empty if unavailable
 } DropboxBackupEntry;
 
 // Lists the files directly inside a game's Dropbox backup folder (see

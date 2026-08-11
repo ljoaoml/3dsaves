@@ -7,6 +7,8 @@
 #include "checkpoint_saves.h"
 #include "minizip_reader.h"
 #include "update_check.h"
+#include "swkbd_util.h"
+#include "sound.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -121,6 +123,10 @@ typedef struct {
     // filter is off); refresh_visible() rebuilds it after refresh_titles()
     // and whenever the filter is toggled.
     bool extdataFilterOn;
+    // Set via the account menu's "Search games..." (empty = no filter).
+    // Combines with extdataFilterOn in refresh_visible() -- both apply
+    // together, not one replacing the other.
+    char searchQuery[64];
     u32 *visible;
     u32 visibleCount;
     u32 visibleCapacity;
@@ -159,11 +165,32 @@ static const u16 *title_icon_pixels(int index, void *userdata) {
     return state->titles[state->visible[index]].icon;
 }
 
+// Hand-rolled instead of strcasestr(): not guaranteed present in every
+// devkitARM newlib config, same reasoning as http.c's own contains_ci()
+// (this file can't be compile-tested here either).
+static bool ascii_case_eq(char a, char b) {
+    if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+    if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+    return a == b;
+}
+
+static bool contains_ci(const char *haystack, const char *needle) {
+    size_t needleLen = strlen(needle);
+    if (needleLen == 0) return true;
+    for (const char *p = haystack; *p; p++) {
+        size_t i = 0;
+        while (i < needleLen && p[i] && ascii_case_eq(p[i], needle[i])) i++;
+        if (i == needleLen) return true;
+    }
+    return false;
+}
+
 // Rebuilds state->visible from state->titles/titleCount and the current
-// extdataFilterOn setting, then hands the result to ui_set_home_icons().
-// Called after every refresh_titles() and whenever SELECT toggles the
-// filter -- titleCount is also visible's upper bound on how large it'll
-// ever need to be, so the backing array only grows, never shrinks.
+// extdataFilterOn/searchQuery settings, then hands the result to
+// ui_set_home_icons(). Called after every refresh_titles() and whenever
+// SELECT toggles the extdata filter or the account menu's search changes
+// -- titleCount is also visible's upper bound on how large it'll ever
+// need to be, so the backing array only grows, never shrinks.
 static void refresh_visible(MenuState *state) {
     if (state->visibleCapacity < state->titleCount) {
         u32 *grown = realloc(state->visible, sizeof(u32) * state->titleCount);
@@ -175,6 +202,7 @@ static void refresh_visible(MenuState *state) {
     state->visibleCount = 0;
     for (u32 i = 0; i < state->titleCount; i++) {
         if (state->extdataFilterOn && !state->titles[i].extdataAccessible) continue;
+        if (state->searchQuery[0] && !contains_ci(title_display_name(&state->titles[i]), state->searchQuery)) continue;
         state->visible[state->visibleCount++] = i;
     }
 
@@ -202,7 +230,18 @@ static void refresh_titles(MenuState *state) {
     if (state->titles) free(state->titles);
     state->titles = NULL;
     state->titleCount = 0;
-    saves_list_titles(&state->titles, &state->titleCount);
+    ProgressState scanProgress = { "Scanning games", -1 };
+    Result rc = saves_list_titles(&state->titles, &state->titleCount, report_progress, &scanProgress);
+    if (R_FAILED(rc)) {
+        // Rare (amInit() itself failing, e.g. AM unavailable) -- worth
+        // surfacing rather than silently showing an empty grid with no
+        // explanation, but not worth aborting the caller over: state
+        // just ends up with zero titles, same as it would have anyway.
+        char msg[96];
+        snprintf(msg, sizeof(msg), "\nCould not list installed games (0x%08lX).\n", (unsigned long)rc);
+        ui_print_error(msg);
+        ui_wait_for_a();
+    }
     refresh_visible(state);
 }
 
@@ -215,10 +254,20 @@ static void refresh_account_email(DropboxTokens *tokens) {
     ui_set_account_email(ok ? email : NULL);
 }
 
+// Entry count/order shifts depending on whether a search is active (an
+// extra "Clear search" entry appears right after "Search games..."), so
+// both this and show_account_menu() below compute the same layout from
+// state->searchQuery rather than using fixed indices.
 static const char *account_menu_label(int index, void *userdata) {
-    (void)userdata;
+    const MenuState *state = (const MenuState *)userdata;
     if (index == 0) return ui_is_email_hidden() ? "Show email in header" : "Hide email in header";
-    if (index == 1) return "Log out";
+    if (index == 1) return "Search games...";
+    if (state->searchQuery[0]) {
+        if (index == 2) return "Clear search";
+        if (index == 3) return "Log out";
+    } else if (index == 2) {
+        return "Log out";
+    }
     return "?";
 }
 
@@ -226,10 +275,11 @@ static const char *account_menu_label(int index, void *userdata) {
 // instead of logging out directly -- room to grow (this is where any
 // future account-level setting belongs) and a deliberate extra step
 // before something as disruptive as logging out. Loops so toggling the
-// email visibility doesn't immediately kick back out to the grid.
+// email visibility/searching doesn't immediately kick back out to the grid.
 static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
     for (;;) {
-        int choice = ui_run_menu("Manage account", 2, account_menu_label, NULL);
+        int entryCount = state->searchQuery[0] ? 4 : 3;
+        int choice = ui_run_menu("Manage account", entryCount, account_menu_label, state);
         if (choice < 0) return; // B: back to the grid, nothing changed
 
         if (choice == 0) {
@@ -237,7 +287,22 @@ static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
             continue;
         }
 
-        // choice == 1: log out
+        if (choice == 1) {
+            char query[64];
+            if (swkbd_get_text("Search games by name", query, sizeof(query)) && query[0]) {
+                snprintf(state->searchQuery, sizeof(state->searchQuery), "%s", query);
+                refresh_visible(state);
+            }
+            continue;
+        }
+
+        if (state->searchQuery[0] && choice == 2) { // "Clear search"
+            state->searchQuery[0] = '\0';
+            refresh_visible(state);
+            continue;
+        }
+
+        // Whichever index "Log out" landed on above.
         if (ui_confirm("Log out of Dropbox?")) {
             auth_delete_tokens();
             memset(tokens, 0, sizeof(*tokens));
@@ -301,7 +366,13 @@ static void print_dropbox_backups(DropboxTokens *tokens, const char *gameName) {
         ui_print("No backups uploaded yet.\n");
     } else {
         for (int i = 0; i < count; i++) {
-            if (entries[i].size >= 0) {
+            bool haveSize = entries[i].size >= 0;
+            bool haveDate = entries[i].modified[0] != '\0';
+            if (haveSize && haveDate) {
+                ui_printf("%s (%ld KB, %s)\n", entries[i].name, entries[i].size / 1024, entries[i].modified);
+            } else if (haveDate) {
+                ui_printf("%s (%s)\n", entries[i].name, entries[i].modified);
+            } else if (haveSize) {
                 ui_printf("%s (%ld KB)\n", entries[i].name, entries[i].size / 1024);
             } else {
                 ui_printf("%s\n", entries[i].name);
@@ -555,8 +626,17 @@ static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
 
     int okCount = 0, failCount = 0;
     char failedNames[512] = {0};
+    bool systemRequestedClose = false;
 
     for (u32 i = 0; i < state->titleCount; i++) {
+        // A batch of many games can run long enough that the system's own
+        // HOME-menu/sleep handling needs servicing before this loop would
+        // otherwise get back around to it (main()'s own while(aptMainLoop())
+        // only sees between whole actions, not mid-batch) -- checking here
+        // too means a system-requested close during a long run is honored
+        // promptly instead of only after every title's been attempted.
+        if (!aptMainLoop()) { systemRequestedClose = true; break; }
+
         InstalledTitle *t = &state->titles[i];
         const char *gameName = title_display_name(t);
 
@@ -589,6 +669,10 @@ static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
             }
         }
     }
+
+    // The app is closing -- don't block on a summary screen waiting for a
+    // keypress that may never come.
+    if (systemRequestedClose) return;
 
     ui_clear();
     if (failCount == 0) {
@@ -653,8 +737,19 @@ static void import_and_upload(MenuState *state, DropboxTokens *tokens) {
         return;
     }
 
+    // A timestamped instance name, same as every other upload path in
+    // this app (backup_all_titles(), show_checkpoint_folder_detail(),
+    // show_other_apps_picker()) -- this one used to build a fixed
+    // "<name>/<name>.zip" path instead, silently overwriting the
+    // previous backup on every re-import with no history kept.
+    char timestamp[64];
+    time_t now = time(NULL);
+    struct tm *tmNow = localtime(&now);
+    if (tmNow) strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", tmNow);
+    else snprintf(timestamp, sizeof(timestamp), "backup");
+
     char dropboxPath[192];
-    dropbox_build_game_path(gameName, dropboxPath, sizeof(dropboxPath));
+    dropbox_build_backup_path(gameName, timestamp, dropboxPath, sizeof(dropboxPath));
 
     ProgressState progress = { "Uploading to Dropbox", -1 };
     char error[256];
@@ -735,8 +830,12 @@ static void backup_all_instances_in_folder(MenuState *state, DropboxTokens *toke
 
     int okCount = 0, failCount = 0;
     char failedNames[512] = {0};
+    bool systemRequestedClose = false;
 
     for (int i = 0; i < count; i++) {
+        // See backup_all_titles()'s matching check for why this is here.
+        if (!aptMainLoop()) { systemRequestedClose = true; break; }
+
         ui_clear();
         ui_printf("Backup %d/%d: %s...\n", i + 1, count, instances[i].name);
         ui_flush();
@@ -766,6 +865,9 @@ static void backup_all_instances_in_folder(MenuState *state, DropboxTokens *toke
     }
 
     if (okCount > 0) mark_backed_up_by_unique_id(state, folder->uniqueId);
+
+    // The app is closing -- don't block on a summary screen.
+    if (systemRequestedClose) return;
 
     ui_clear();
     if (failCount == 0) {
@@ -923,9 +1025,14 @@ static const char *other_title_menu_label(int index, void *userdata) {
 }
 
 static void show_other_apps_picker(DropboxTokens *tokens) {
+    ui_clear();
+    ui_print("Scanning every installed app...\n");
+    ui_flush();
+
     InstalledTitle *titles = NULL;
     u32 count = 0;
-    Result rc = saves_list_all_titles(&titles, &count);
+    ProgressState scanProgress = { "Scanning apps", -1 };
+    Result rc = saves_list_all_titles(&titles, &count, report_progress, &scanProgress);
     if (R_FAILED(rc) || count == 0) {
         ui_clear();
         ui_print_error("\nNo installed apps found.\n");
@@ -1093,6 +1200,7 @@ int main(void) {
     romfsInit();
     ui_init();
     http_init();
+    sound_init(); // best-effort -- see sound.h, a no-op everywhere if this fails
 
     mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
     mkdir("sdmc:/3ds/Konnect3DS", 0777);
@@ -1221,6 +1329,7 @@ int main(void) {
 
     if (state.titles) free(state.titles);
     if (state.visible) free(state.visible);
+    sound_exit();
     http_exit();
     ui_exit();
     romfsExit();

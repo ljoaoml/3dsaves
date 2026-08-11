@@ -31,6 +31,16 @@ typedef struct {
     bool isRawGbaSave;
 } InstalledTitle;
 
+// Optional progress callback for saves_list_titles()/saves_list_all_titles()
+// (see below): called after each candidate title is probed, with `current`
+// counting up to `total` -- the raw AM title count for whichever media
+// type (SD or the game card) is currently being scanned, so this resets
+// once partway through (SD's own total, then the card's, which is always
+// 0 or 1 and not worth a separate progress line -- see saves.c). Same
+// (u32, u32, void*) shape as HttpProgressFn/ZipProgressFn, so main.c's
+// existing report_progress() helper works here unchanged.
+typedef void (*TitleScanProgressFn)(u32 current, u32 total, void *userdata);
+
 // Lists installed titles (SD + inserted cartridge) that are both regular
 // applications (0x00040000 category, minus a short list of known non-game
 // system titles -- Instruction Manual, Internet Browser, title updates,
@@ -41,9 +51,12 @@ typedef struct {
 // title whose SAVEDATA archive doesn't open is still included if it turns
 // out to be a GBA Virtual Console inject with a save reachable the other
 // way (see InstalledTitle.isRawGbaSave) -- so this is really "accessible
-// via *some* save path", not strictly SAVEDATA. Caller must free() the
-// returned array.
-Result saves_list_titles(InstalledTitle **out, u32 *count);
+// via *some* save path", not strictly SAVEDATA. Result is sorted by
+// display name (title name, falling back to product code) for a
+// predictable on-screen order. Caller must free() the returned array.
+// `onProgress`/`userdata` are optional (NULL/NULL for none).
+Result saves_list_titles(InstalledTitle **out, u32 *count,
+                          TitleScanProgressFn onProgress, void *userdata);
 
 // Same as saves_list_titles(), but with neither of its two exclusions
 // applied: every application-category (0x00040000) title is included,
@@ -53,9 +66,10 @@ Result saves_list_titles(InstalledTitle **out, u32 *count);
 // for some reason its probes don't recognize -- expect this to include
 // plenty of built-in apps with no real save at all (Mii Maker, Face
 // Raiders, ...); attempting a backup on one of those just fails cleanly,
-// same as any other title this project can't read. Caller must free()
-// the returned array.
-Result saves_list_all_titles(InstalledTitle **out, u32 *count);
+// same as any other title this project can't read. Also sorted by display
+// name. Caller must free() the returned array.
+Result saves_list_all_titles(InstalledTitle **out, u32 *count,
+                              TitleScanProgressFn onProgress, void *userdata);
 
 // Backs up `title`'s save into a new zip at `zipPath` on SD: every file in
 // its SAVEDATA archive preserving the directory structure, or (when

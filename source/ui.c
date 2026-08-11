@@ -1,7 +1,9 @@
 #include "ui.h"
+#include "sound.h"
 #include <3ds.h>
 #include <citro2d.h>
 #include <citro3d.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -374,6 +376,18 @@ static void draw_icon_grid(void) {
     int visibleRows = grid_visible_rows();
     float step = ICON_TILE_SIZE + ICON_TILE_GAP;
 
+    // A slow "breathing" pulse on the selected tile's highlight -- purely
+    // cosmetic. Driven by a persistent counter incremented once per call
+    // (one call per rendered frame while the grid is up) rather than
+    // osGetTime(), so it can't ever jump if a frame takes longer than
+    // usual, just steps at whatever rate frames actually render.
+    static u32 s_pulseFrame = 0;
+    s_pulseFrame++;
+    float pulse = 0.5f + 0.5f * sinf((float)s_pulseFrame * 0.08f); // 0..1, ~1.3s period at 60fps
+    float highlightPad = 4.0f + pulse * 2.0f;               // 4..6px frame around the tile
+    u8 highlightAlpha = (u8)(170.0f + pulse * 85.0f);        // 170..255
+    u32 highlightColor = C2D_Color32(0x58, 0x54, 0xC1, highlightAlpha); // COLOR_SELECT_BG's RGB, animated alpha
+
     for (int i = 0; i < s_grid.count; i++) {
         int row = i / cols;
         if (row < s_grid.scrollRow || row >= s_grid.scrollRow + visibleRows) continue;
@@ -382,7 +396,9 @@ static void draw_icon_grid(void) {
         float y = ICON_GRID_Y + (row - s_grid.scrollRow) * step;
 
         if (i == s_grid.selected) {
-            C2D_DrawRectSolid(x - 4.0f, y - 4.0f, 0.0f, ICON_TILE_SIZE + 8.0f, ICON_TILE_SIZE + 8.0f, COLOR_SELECT_BG);
+            C2D_DrawRectSolid(x - highlightPad, y - highlightPad, 0.0f,
+                               ICON_TILE_SIZE + highlightPad * 2.0f, ICON_TILE_SIZE + highlightPad * 2.0f,
+                               highlightColor);
         }
 
         if (i == 0 || i == 1 || i == 2) {
@@ -700,10 +716,12 @@ void ui_printf(const char *fmt, ...) {
 void ui_print_success(const char *text) {
     s_topLastLineIsProgress = false;
     log_append(s_topLines, &s_topCount, text, COLOR_SUCCESS);
+    sound_play_success();
 }
 void ui_print_error(const char *text) {
     s_topLastLineIsProgress = false;
     log_append(s_topLines, &s_topCount, text, COLOR_DANGER);
+    sound_play_error();
 }
 
 // Updates (or starts) a single "live status" line on the top screen's log

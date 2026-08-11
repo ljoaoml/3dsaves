@@ -341,7 +341,8 @@ bool saves_detect_ds_card(char *gameCode, size_t gameCodeSize, char *description
 // filled in correctly in both cases, so the normal backup functions work
 // identically on a title found this way.
 static Result list_titles_for_media(FS_MediaType mediatype, bool applyFilters, InstalledTitle **arr,
-                                     u32 *count, u32 *capacity) {
+                                     u32 *count, u32 *capacity,
+                                     TitleScanProgressFn onProgress, void *userdata) {
     u32 total = 0;
     Result rc = AM_GetTitleCount(mediatype, &total);
     if (R_FAILED(rc) || total == 0) return 0;
@@ -354,6 +355,7 @@ static Result list_titles_for_media(FS_MediaType mediatype, bool applyFilters, I
     if (R_FAILED(rc)) { free(ids); return rc; }
 
     for (u32 i = 0; i < read; i++) {
+        if (onProgress) onProgress(i + 1, read, userdata);
         if (!is_application_title(ids[i])) continue;
         if (applyFilters && is_system_excluded(ids[i])) continue;
 
@@ -402,7 +404,21 @@ static Result list_titles_for_media(FS_MediaType mediatype, bool applyFilters, I
     return 0;
 }
 
-Result saves_list_titles(InstalledTitle **out, u32 *count) {
+// Plain strcmp, not a case-insensitive compare -- devkitARM's newlib
+// doesn't guarantee strcasecmp is present in every config (see http.c's
+// do_single_request() comment on the same tradeoff), and real game
+// titles overwhelmingly start with a capital letter anyway, so a plain
+// ASCII sort already reads as alphabetical order in practice.
+static int compare_titles_by_name(const void *a, const void *b) {
+    const InstalledTitle *ta = (const InstalledTitle *)a;
+    const InstalledTitle *tb = (const InstalledTitle *)b;
+    const char *nameA = ta->name[0] ? ta->name : ta->productCode;
+    const char *nameB = tb->name[0] ? tb->name : tb->productCode;
+    return strcmp(nameA, nameB);
+}
+
+Result saves_list_titles(InstalledTitle **out, u32 *count,
+                          TitleScanProgressFn onProgress, void *userdata) {
     *out = NULL;
     *count = 0;
     u32 capacity = 0;
@@ -410,17 +426,19 @@ Result saves_list_titles(InstalledTitle **out, u32 *count) {
     Result rc = amInit();
     if (R_FAILED(rc)) return rc;
 
-    Result rc1 = list_titles_for_media(MEDIATYPE_SD, true, out, count, &capacity);
-    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, true, out, count, &capacity);
+    Result rc1 = list_titles_for_media(MEDIATYPE_SD, true, out, count, &capacity, onProgress, userdata);
+    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, true, out, count, &capacity, onProgress, userdata);
 
     amExit();
 
     if (R_FAILED(rc1)) return rc1;
     if (R_FAILED(rc2)) return rc2;
+    if (*count > 0) qsort(*out, *count, sizeof(InstalledTitle), compare_titles_by_name);
     return 0;
 }
 
-Result saves_list_all_titles(InstalledTitle **out, u32 *count) {
+Result saves_list_all_titles(InstalledTitle **out, u32 *count,
+                              TitleScanProgressFn onProgress, void *userdata) {
     *out = NULL;
     *count = 0;
     u32 capacity = 0;
@@ -428,13 +446,14 @@ Result saves_list_all_titles(InstalledTitle **out, u32 *count) {
     Result rc = amInit();
     if (R_FAILED(rc)) return rc;
 
-    Result rc1 = list_titles_for_media(MEDIATYPE_SD, false, out, count, &capacity);
-    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, false, out, count, &capacity);
+    Result rc1 = list_titles_for_media(MEDIATYPE_SD, false, out, count, &capacity, onProgress, userdata);
+    Result rc2 = list_titles_for_media(MEDIATYPE_GAME_CARD, false, out, count, &capacity, onProgress, userdata);
 
     amExit();
 
     if (R_FAILED(rc1)) return rc1;
     if (R_FAILED(rc2)) return rc2;
+    if (*count > 0) qsort(*out, *count, sizeof(InstalledTitle), compare_titles_by_name);
     return 0;
 }
 

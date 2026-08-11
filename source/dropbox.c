@@ -34,12 +34,6 @@ void dropbox_sanitize_name(const char *name, char *out, size_t outSize) {
     if (out[0] == '\0') snprintf(out, outSize, "Unknown");
 }
 
-void dropbox_build_game_path(const char *name, char *out, size_t outSize) {
-    char safe[128];
-    dropbox_sanitize_name(name, safe, sizeof(safe));
-    snprintf(out, outSize, "/Konnect3DS/%s/%s.zip", safe, safe);
-}
-
 void dropbox_build_game_folder(const char *name, char *out, size_t outSize) {
     char safe[128];
     dropbox_sanitize_name(name, safe, sizeof(safe));
@@ -238,6 +232,12 @@ bool dropbox_list_backups(DropboxTokens *tokens, const char *gameName,
         if (!json_get_string(entryJson, "name", e->name, sizeof(e->name))) continue;
         e->size = -1;
         json_get_int(entryJson, "size", &e->size);
+        // server_modified is Dropbox's own ISO-8601 UTC timestamp
+        // ("2026-08-10T15:30:00Z") for when it actually received the
+        // file -- e->modified's small size truncates it down to just the
+        // "YYYY-MM-DD" date part, which is all this app displays.
+        e->modified[0] = '\0';
+        json_get_string(entryJson, "server_modified", e->modified, sizeof(e->modified));
         count++;
     }
 
