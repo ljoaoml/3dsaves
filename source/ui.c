@@ -1,5 +1,4 @@
 #include "ui.h"
-#include "sound.h"
 #include <3ds.h>
 #include <citro2d.h>
 #include <citro3d.h>
@@ -86,6 +85,13 @@ static bool s_bgLoaded;
 static C2D_SpriteSheet s_folderIconSheet;
 static C2D_Image s_folderIcon;
 static bool s_folderIconLoaded;
+// The real Konnect3DS logo lockup (icon + wordmark), same artwork already
+// used for the app's HOME menu banner (resources/banner.png) -- shown on
+// the boot splash (ui_show_splash()) instead of a plain drawn text title.
+// Same optional-load contract as the background/folder icon above.
+static C2D_SpriteSheet s_logoSheet;
+static C2D_Image s_logoImage;
+static bool s_logoLoaded;
 
 // Title icon textures (see ui_set_home_icons()), drawn by the icon grid
 // (ui_run_icon_grid()/draw_icon_grid()). Every title icon is built the
@@ -417,25 +423,13 @@ static void draw_icon_grid(void) {
         s_grid.scrollOffset = (float)s_grid.scrollRow;
     }
 
-    // A slow "breathing" pulse on the selected tile's highlight -- purely
-    // cosmetic. Driven by a persistent counter incremented once per call
-    // (one call per rendered frame while the grid is up) rather than
-    // osGetTime(), so it can't ever jump if a frame takes longer than
-    // usual, just steps at whatever rate frames actually render.
-    static u32 s_pulseFrame = 0;
-    // Wrapped well short of where a growing float's precision would
-    // start eroding the 0.08f-per-frame phase step (imperceptible after
-    // hours of continuous uptime otherwise, but free to just avoid) --
-    // 100000 isn't an exact multiple of the ~78.5-frame period, so
-    // wrapping causes one negligible phase hiccup roughly every half
-    // hour rather than a real jump cut.
-    s_pulseFrame = (s_pulseFrame + 1) % 100000;
-    float pulse = 0.5f + 0.5f * sinf((float)s_pulseFrame * 0.08f); // 0..1, ~1.3s period at 60fps
-    // s_grid.pressAnim (see ui_run_icon_grid()'s KEY_A handling) briefly
-    // boosts both on top of the ambient pulse right after A is pressed,
-    // for a quick "confirm" flash before the tile's actually opened.
-    float highlightPad = 4.0f + pulse * 2.0f + s_grid.pressAnim * 3.0f;       // 4..6px, +0..3px on press
-    float highlightAlphaF = 170.0f + pulse * 85.0f + s_grid.pressAnim * 60.0f; // 170..255, +0..60 on press
+    // Static highlight frame around the selected tile. s_grid.pressAnim
+    // (see ui_run_icon_grid()'s KEY_A handling) briefly boosts both right
+    // after A is pressed, for a quick "confirm" flash before the tile's
+    // actually opened -- the only animation left on this highlight; an
+    // earlier continuous "breathing" pulse was removed per user feedback.
+    float highlightPad = 4.0f + s_grid.pressAnim * 3.0f;       // 4px, +0..3px on press
+    float highlightAlphaF = 210.0f + s_grid.pressAnim * 45.0f; // 210, +0..45 on press
     if (highlightAlphaF > 255.0f) highlightAlphaF = 255.0f;
     u32 highlightColor = C2D_Color32(0x58, 0x54, 0xC1, (u8)highlightAlphaF); // COLOR_SELECT_BG's RGB, animated alpha
 
@@ -539,7 +533,16 @@ void ui_init(void) {
     // ui_init() for exactly this reason) -- these are RomFS paths.
     s_bgSheet = C2D_SpriteSheetLoad("romfs:/gfx/bgpattern.t3x");
     s_bgLoaded = s_bgSheet != NULL;
-    if (s_bgLoaded) s_bgImage = C2D_SpriteSheetGetImage(s_bgSheet, 0);
+    if (s_bgLoaded) {
+        s_bgImage = C2D_SpriteSheetGetImage(s_bgSheet, 0);
+        // Both screens draw this downscaled from its 512x288 source (400x240
+        // top, 320x240 bottom -- see draw_background()); this was missing
+        // linear filtering (unlike the icons below), so the fine triangle
+        // pattern could alias/moire on the shrink, especially on the
+        // narrower bottom screen -- plausibly what read as the bottom
+        // screen's background looking a shade off from the top's.
+        C3D_TexSetFilter(s_bgImage.tex, GPU_LINEAR, GPU_LINEAR);
+    }
 
     s_folderIconSheet = C2D_SpriteSheetLoad("romfs:/gfx/folder_icon.t3x");
     s_folderIconLoaded = s_folderIconSheet != NULL;
@@ -548,6 +551,13 @@ void ui_init(void) {
         // Drawn well below its native resolution (grid tile size vs. the
         // source PNG) -- linear filtering avoids aliasing on that downscale.
         C3D_TexSetFilter(s_folderIcon.tex, GPU_LINEAR, GPU_LINEAR);
+    }
+
+    s_logoSheet = C2D_SpriteSheetLoad("romfs:/gfx/logo.t3x");
+    s_logoLoaded = s_logoSheet != NULL;
+    if (s_logoLoaded) {
+        s_logoImage = C2D_SpriteSheetGetImage(s_logoSheet, 0);
+        C3D_TexSetFilter(s_logoImage.tex, GPU_LINEAR, GPU_LINEAR);
     }
 
     // Restores the "hide email" preference from a previous run (see
@@ -584,6 +594,7 @@ void ui_exit(void) {
     s_titleBackedUp = NULL;
     s_titleBackedUpCount = 0;
     if (s_folderIconLoaded) C2D_SpriteSheetFree(s_folderIconSheet);
+    if (s_logoLoaded) C2D_SpriteSheetFree(s_logoSheet);
     if (s_bgLoaded) C2D_SpriteSheetFree(s_bgSheet);
     C2D_TextBufDelete(s_textBuf);
     C2D_Fini();
@@ -788,12 +799,10 @@ void ui_printf(const char *fmt, ...) {
 void ui_print_success(const char *text) {
     s_topLastLineIsProgress = false;
     log_append(s_topLines, &s_topCount, text, COLOR_SUCCESS);
-    sound_play_success();
 }
 void ui_print_error(const char *text) {
     s_topLastLineIsProgress = false;
     log_append(s_topLines, &s_topCount, text, COLOR_DANGER);
-    sound_play_error();
 }
 
 // Updates (or starts) a single "live status" line on the top screen's log
@@ -991,8 +1000,11 @@ done:
     return result;
 }
 
-// The very first thing shown on launch (see main()) -- big centered app
-// name, held for `frames` vblanks (skippable with A/B/START, same
+// The very first thing shown on launch (see main()) -- the real Konnect3DS
+// logo (romfs:/gfx/logo.t3x, built from resources/banner.png -- the same
+// artwork already used for the app's HOME menu banner, so the boot splash
+// and the HOME menu entry show the same lockup instead of a plain drawn
+// title), held for `frames` vblanks (skippable with A/B/START, same
 // contract as ui_wait_briefly()) and self-fading to the background color
 // over its last FADE_OUT_FRAMES frames so the handoff into the login
 // gate/icon grid right after reads as a transition rather than a hard
@@ -1001,6 +1013,9 @@ done:
 // show yet, so this just draws both screens directly in its own loop.
 void ui_show_splash(int frames) {
     const int fadeOutFrames = 15;
+    const float logoW = 256.0f, logoH = 128.0f;
+    const float logoX = (TOP_W - logoW) / 2.0f;
+    const float logoY = TOP_H / 2.0f - logoH / 2.0f - 14.0f;
     for (int i = 0; i < frames; i++) {
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C2D_TextBufClear(s_textBuf);
@@ -1008,9 +1023,16 @@ void ui_show_splash(int frames) {
         C2D_TargetClear(s_top, COLOR_BG);
         C2D_SceneBegin(s_top);
         draw_background(TOP_W, TOP_H, false);
-        draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f - 16.0f, 1.1f, COLOR_ACCENT,
-                           "KONNECT3DS", true, C2D_AlignCenter);
-        draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f + 20.0f, TEXT_SCALE, COLOR_MUTED,
+        if (s_logoLoaded) {
+            C2D_DrawImageAt(s_logoImage, logoX, logoY, 0.0f, NULL, 1.0f, 1.0f);
+        } else {
+            // Falls back to the plain drawn title if the logo texture
+            // didn't load (see s_bgLoaded/s_folderIconLoaded's comment --
+            // same "don't crash over a missing optional asset" contract).
+            draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f - 16.0f, 1.1f, COLOR_ACCENT,
+                               "KONNECT3DS", true, C2D_AlignCenter);
+        }
+        draw_text_aligned(TOP_W / 2.0f, logoY + logoH + 14.0f, TEXT_SCALE, COLOR_MUTED,
                            "Game saves, backed up to Dropbox", false, C2D_AlignCenter);
         if (i >= frames - fadeOutFrames) {
             float t = (float)(i - (frames - fadeOutFrames)) / (float)fadeOutFrames;

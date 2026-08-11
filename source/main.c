@@ -8,7 +8,6 @@
 #include "minizip_reader.h"
 #include "update_check.h"
 #include "swkbd_util.h"
-#include "sound.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -1217,7 +1216,6 @@ int main(void) {
     romfsInit();
     ui_init();
     http_init();
-    sound_init(); // best-effort -- see sound.h, a no-op everywhere if this fails
 
     ui_show_splash(90); // ~1.5s at 60fps, skippable with A/B/START
 
@@ -1348,7 +1346,6 @@ int main(void) {
 
     if (state.titles) free(state.titles);
     if (state.visible) free(state.visible);
-    sound_exit();
     http_exit();
     ui_exit();
     romfsExit();
