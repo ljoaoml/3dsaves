@@ -182,19 +182,18 @@ static struct {
 
 static const char *s_confirmPrompt;
 
-// ui_run_icon_grid()'s navigation state. Tile 0 is always the reserved
-// "import from folder" tile (drawn from the folder icon texture, not
-// title-icon data); tiles 1..titleCount are whatever ui_set_home_icons()
-// last built. getLabel (optional) supplies the caption shown under the
-// grid for the highlighted tile -- index 0 for the folder tile, same
-// indices as get_pixels() otherwise.
+// ui_run_icon_grid()'s navigation state. Tiles 0-3 are always the four
+// reserved tiles (import, Checkpoint, other apps, search -- see
+// draw_icon_grid()); tiles 4..titleCount+3 are whatever
+// ui_set_home_icons() last built. getLabel (optional) supplies the
+// caption shown under the grid for the highlighted tile -- index 0-3 for
+// the reserved tiles, same indices as get_pixels() (offset by 4) otherwise.
 static struct {
-    int count; // 1 + title count
+    int count; // 4 + title count
     int cols;
     int selected;
     int scrollRow;      // target row, from the clamping logic in ui_run_icon_grid()
     float scrollOffset;  // visual row position -- eases toward scrollRow each drawn frame (draw_icon_grid())
-    float pressAnim;     // 0..1 "just pressed A" flash on the selected tile, see draw_icon_grid()
     int fadeFrame;        // counts up each drawn frame from the start of ui_run_icon_grid(); drives the fade-in overlay
     ui_menu_label_fn getLabel;
     void *userdata;
@@ -403,8 +402,47 @@ static void draw_rounded_rect(float x, float y, float w, float h, float radius, 
     }
 }
 
+// The icon grid's 4th reserved tile (search) -- no asset for this either
+// (see draw_person_icon()'s same reasoning), and unlike the other three
+// reserved tiles it doesn't reuse the folder icon texture: a magnifying
+// glass needs a hollow ring, and there's no rounded-rect-style "punch a
+// hole" trick that works cleanly over an image with its own shading, only
+// over a flat color this function fully controls. So it draws its own
+// flat backdrop square, then the ring as a solid circle with a second
+// circle of that exact same backdrop color punched into the middle, plus
+// a short diagonal handle (two triangles forming a thick rotated bar --
+// citro2d has no direct "thick line" primitive) at a fixed 45-degree angle.
+static void draw_search_tile(float x, float y, float size) {
+    u32 bg = C2D_Color32(0xE4, 0xE2, 0xF6, 0xFF); // pale lavender, distinct from the folder icon's medium purple
+    u32 glyph = C2D_Color32(0x58, 0x54, 0xC1, 0xFF); // COLOR_ACCENT's RGB
+
+    draw_rounded_rect(x, y, size, size, 10.0f, bg);
+
+    float cx = x + size * 0.42f;
+    float cy = y + size * 0.42f;
+    float outerR = size * 0.22f;
+    float innerR = outerR - size * 0.075f;
+    C2D_DrawCircleSolid(cx, cy, 0.0f, outerR, glyph);
+    C2D_DrawCircleSolid(cx, cy, 0.0f, innerR, bg);
+
+    float dirX = 0.7071f, dirY = 0.7071f; // 45 degrees, pointing down-right
+    float perpX = -dirY, perpY = dirX;
+    float half = size * 0.045f; // handle half-thickness
+    float startD = outerR + size * 0.02f;
+    float endD = size * 0.46f;
+    float sx = cx + dirX * startD, sy = cy + dirY * startD;
+    float ex = cx + dirX * endD, ey = cy + dirY * endD;
+    C2D_DrawTriangle(sx - perpX * half, sy - perpY * half, glyph,
+                      sx + perpX * half, sy + perpY * half, glyph,
+                      ex + perpX * half, ey + perpY * half, glyph, 0.0f);
+    C2D_DrawTriangle(sx - perpX * half, sy - perpY * half, glyph,
+                      ex + perpX * half, ey + perpY * half, glyph,
+                      ex - perpX * half, ey - perpY * half, glyph, 0.0f);
+}
+
 // The icon grid itself: tiles 0/1/2 are always the three reserved
-// folder-style tiles, tiles 3..s_grid.count-1 are title icons (see
+// folder-style tiles, tile 3 is the reserved search tile (see
+// draw_search_tile()), tiles 4..s_grid.count-1 are title icons (see
 // ui_set_home_icons()) -- this is the top screen's actual page content
 // while ui_run_icon_grid() is active, occupying most of the screen below
 // draw_top_header(), not a decorative strip. The highlighted tile gets a
@@ -427,15 +465,11 @@ static void draw_icon_grid(void) {
         s_grid.scrollOffset = (float)s_grid.scrollRow;
     }
 
-    // Static highlight frame around the selected tile. s_grid.pressAnim
-    // (see ui_run_icon_grid()'s KEY_A handling) briefly boosts both right
-    // after A is pressed, for a quick "confirm" flash before the tile's
-    // actually opened -- the only animation left on this highlight; an
-    // earlier continuous "breathing" pulse was removed per user feedback.
-    float highlightPad = 4.0f + s_grid.pressAnim * 3.0f;       // 4px, +0..3px on press
-    float highlightAlphaF = 210.0f + s_grid.pressAnim * 45.0f; // 210, +0..45 on press
-    if (highlightAlphaF > 255.0f) highlightAlphaF = 255.0f;
-    u32 highlightColor = C2D_Color32(0x58, 0x54, 0xC1, (u8)highlightAlphaF); // COLOR_SELECT_BG's RGB, animated alpha
+    // Static highlight frame around the selected tile -- no animation at
+    // all now (an earlier continuous "breathing" pulse, then a brief
+    // per-press flash, were both removed per user feedback).
+    const float highlightPad = 4.0f;
+    const u32 highlightColor = C2D_Color32(0x58, 0x54, 0xC1, 210); // COLOR_SELECT_BG's RGB
 
     for (int i = 0; i < s_grid.count; i++) {
         int row = i / cols;
@@ -470,7 +504,16 @@ static void draw_icon_grid(void) {
             continue;
         }
 
-        int titleIdx = i - 3;
+        if (i == 3) {
+            // Search, drawn with its own magnifying-glass glyph (see
+            // draw_search_tile()) rather than the folder icon -- it isn't
+            // a folder to browse into, it's an action, so it deliberately
+            // doesn't look like the other three.
+            draw_search_tile(x, y, ICON_TILE_SIZE);
+            continue;
+        }
+
+        int titleIdx = i - 4;
         if (titleIdx < s_titleIconCount && s_titleIconValid[titleIdx]) {
             C2D_Image img = { &s_titleIconTex[titleIdx], &s_titleIconSubtex };
             C2D_DrawImageAt(img, x, y, 0.0f, NULL, ICON_TILE_SIZE / 48.0f, ICON_TILE_SIZE / 48.0f);
@@ -917,12 +960,11 @@ bool ui_confirm(const char *prompt) {
 }
 
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
-    s_grid.count = 3 + s_titleIconCount; // tile 0 = import, tile 1 = Checkpoint, tile 2 = other apps
+    s_grid.count = 4 + s_titleIconCount; // tile 0 = import, tile 1 = Checkpoint, tile 2 = other apps, tile 3 = search
     s_grid.cols = grid_cols();
     if (s_grid.selected >= s_grid.count) s_grid.selected = 0;
     s_grid.scrollRow = 0;
     s_grid.scrollOffset = 0.0f; // fresh session -- no scroll animation on first appearance, only for in-session moves
-    s_grid.pressAnim = 0.0f;
     s_grid.fadeFrame = 0;
     s_grid.getLabel = get_label;
     s_grid.userdata = userdata;
@@ -977,20 +1019,8 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
                 int next = s_grid.selected - visibleRows * s_grid.cols;
                 s_grid.selected = next >= 0 ? next : 0;
                 decided = true;
-            } else if (kDown & KEY_A) {
-                // A brief "confirm" flash on the selected tile (see
-                // draw_icon_grid()'s use of s_grid.pressAnim) before
-                // actually committing the pick -- still drawn through
-                // ui_flush() each of these frames, so the background/
-                // header/footer stay exactly as they were.
-                for (int f = 0; f < 6; f++) {
-                    s_grid.pressAnim = (float)(f + 1) / 6.0f;
-                    ui_flush();
-                    gspWaitForVBlank();
-                }
-                result = s_grid.selected;
-                goto done;
-            } else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
+            } else if (kDown & KEY_A) { result = s_grid.selected; goto done; }
+            else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
             else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
             else if (kDown & KEY_X) { result = UI_GRID_ACCOUNT; goto done; }
             else if (kDown & KEY_Y) { result = UI_GRID_BACKUP_ALL; goto done; }

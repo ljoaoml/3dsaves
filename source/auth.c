@@ -446,7 +446,7 @@ bool auth_run_login_flow(DropboxTokens *out, bool *wantExit) {
     }
 
     if (!haveCode) {
-        if (!swkbd_get_text("Paste the Dropbox authorization code", code, sizeof(code)) ||
+        if (!swkbd_get_text("Paste the Dropbox authorization code", code, sizeof(code), false) ||
             strlen(code) == 0) {
             return false;
         }

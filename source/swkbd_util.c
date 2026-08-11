@@ -2,7 +2,7 @@
 #include <3ds.h>
 #include <string.h>
 
-bool swkbd_get_text(const char *hint, char *out, size_t out_size) {
+bool swkbd_get_text(const char *hint, char *out, size_t out_size, bool allowEmpty) {
     SwkbdState swkbd;
     // SWKBD_TYPE_NORMAL: full keyboard, needed since OAuth codes mix
     // upper/lowercase, digits, '-' and '_'. 2 buttons = Cancel/OK.
@@ -10,7 +10,8 @@ bool swkbd_get_text(const char *hint, char *out, size_t out_size) {
     swkbdSetHintText(&swkbd, hint);
     swkbdSetButton(&swkbd, SWKBD_BUTTON_LEFT, "Cancel", false);
     swkbdSetButton(&swkbd, SWKBD_BUTTON_RIGHT, "OK", true);
-    swkbdSetValidation(&swkbd, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+    swkbdSetValidation(&swkbd, allowEmpty ? SWKBD_ANYTHING : SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+    if (out[0]) swkbdSetInitialText(&swkbd, out);
 
     SwkbdButton button = swkbdInputText(&swkbd, out, out_size);
     if (button != SWKBD_BUTTON_RIGHT) {
@@ -27,5 +28,5 @@ bool swkbd_get_text(const char *hint, char *out, size_t out_size) {
     while (out[start] == ' ') start++;
     if (start > 0) memmove(out, out + start, strlen(out + start) + 1);
 
-    return strlen(out) > 0;
+    return allowEmpty || strlen(out) > 0;
 }

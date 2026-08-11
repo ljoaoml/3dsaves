@@ -122,9 +122,9 @@ typedef struct {
     // filter is off); refresh_visible() rebuilds it after refresh_titles()
     // and whenever the filter is toggled.
     bool extdataFilterOn;
-    // Set via the account menu's "Search games..." (empty = no filter).
-    // Combines with extdataFilterOn in refresh_visible() -- both apply
-    // together, not one replacing the other.
+    // Set via the icon grid's search tile (index 3, see grid_label()) --
+    // empty means no filter. Combines with extdataFilterOn in
+    // refresh_visible() -- both apply together, not one replacing the other.
     char searchQuery[64];
     u32 *visible;
     u32 visibleCount;
@@ -135,9 +135,9 @@ static const char *title_display_name(const InstalledTitle *t) {
     return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
 }
 
-// ui_run_icon_grid()'s caption callback: index 0/1/2 are its three
-// reserved tiles, 3..N+2 line up with title_icon_pixels() below (same
-// state->visible indexing, offset by 3 instead of 1). The physical game
+// ui_run_icon_grid()'s caption callback: index 0/1/2/3 are its four
+// reserved tiles, 4..N+3 line up with title_icon_pixels() below (same
+// state->visible indexing, offset by 4 instead of 1). The physical game
 // card slot can only ever hold one title at a time and is easy to mix up
 // with an SD-installed game sharing a similar name, so it's flagged in
 // the caption -- display-only (a static scratch buffer, safe since only
@@ -149,8 +149,14 @@ static const char *grid_label(int index, void *userdata) {
     if (index == 0) return "Import from SD/3DS folder";
     if (index == 1) return "Checkpoint";
     if (index == 2) return "Other apps...";
+    if (index == 3) {
+        if (!state->searchQuery[0]) return "Search games...";
+        static char labelBuf[80];
+        snprintf(labelBuf, sizeof(labelBuf), "Search: \"%s\"", state->searchQuery);
+        return labelBuf;
+    }
 
-    const InstalledTitle *t = &state->titles[state->visible[index - 3]];
+    const InstalledTitle *t = &state->titles[state->visible[index - 4]];
     const char *name = title_display_name(t);
     if (t->mediaType != MEDIATYPE_GAME_CARD) return name;
 
@@ -187,9 +193,10 @@ static bool contains_ci(const char *haystack, const char *needle) {
 // Rebuilds state->visible from state->titles/titleCount and the current
 // extdataFilterOn/searchQuery settings, then hands the result to
 // ui_set_home_icons(). Called after every refresh_titles() and whenever
-// SELECT toggles the extdata filter or the account menu's search changes
-// -- titleCount is also visible's upper bound on how large it'll ever
-// need to be, so the backing array only grows, never shrinks.
+// SELECT toggles the extdata filter or the icon grid's search tile
+// changes the query -- titleCount is also visible's upper bound on how
+// large it'll ever need to be, so the backing array only grows, never
+// shrinks.
 static void refresh_visible(MenuState *state) {
     if (state->visibleCapacity < state->titleCount) {
         u32 *grown = realloc(state->visible, sizeof(u32) * state->titleCount);
@@ -253,37 +260,23 @@ static void refresh_account_email(DropboxTokens *tokens) {
     ui_set_account_email(ok ? email : NULL);
 }
 
-// Entry count/order shifts depending on whether a search is active (an
-// extra "Clear search" entry appears right after "Search games..."), so
-// both this and show_account_menu() below compute the same layout from
-// state->searchQuery rather than using fixed indices.
 static const char *account_menu_label(int index, void *userdata) {
-    const MenuState *state = (const MenuState *)userdata;
+    (void)userdata;
     if (index == 0) return ui_is_email_hidden() ? "Show email in header" : "Hide email in header";
-    if (index == 1) {
-        if (!state->searchQuery[0]) return "Search games...";
-        static char labelBuf[96];
-        snprintf(labelBuf, sizeof(labelBuf), "Search games... (\"%s\")", state->searchQuery);
-        return labelBuf;
-    }
-    if (state->searchQuery[0]) {
-        if (index == 2) return "Clear search";
-        if (index == 3) return "Log out";
-    } else if (index == 2) {
-        return "Log out";
-    }
-    return "?";
+    return "Log out";
 }
 
 // X on the icon grid opens this (see ui_run_icon_grid()'s UI_GRID_ACCOUNT)
 // instead of logging out directly -- room to grow (this is where any
 // future account-level setting belongs) and a deliberate extra step
 // before something as disruptive as logging out. Loops so toggling the
-// email visibility/searching doesn't immediately kick back out to the grid.
+// email visibility doesn't immediately kick back out to the grid.
+// (Search used to live here too -- moved to its own icon-grid tile,
+// see grid_label()/the search dispatch in main(), since burying it behind
+// "manage account" made it hard to find.)
 static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
     for (;;) {
-        int entryCount = state->searchQuery[0] ? 4 : 3;
-        int choice = ui_run_menu("Manage account", entryCount, account_menu_label, state);
+        int choice = ui_run_menu("Manage account", 2, account_menu_label, state);
         if (choice < 0) return; // B: back to the grid, nothing changed
 
         if (choice == 0) {
@@ -291,22 +284,7 @@ static void show_account_menu(MenuState *state, DropboxTokens *tokens) {
             continue;
         }
 
-        if (choice == 1) {
-            char query[64];
-            if (swkbd_get_text("Search games by name", query, sizeof(query)) && query[0]) {
-                snprintf(state->searchQuery, sizeof(state->searchQuery), "%s", query);
-                refresh_visible(state);
-            }
-            continue;
-        }
-
-        if (state->searchQuery[0] && choice == 2) { // "Clear search"
-            state->searchQuery[0] = '\0';
-            refresh_visible(state);
-            continue;
-        }
-
-        // Whichever index "Log out" landed on above.
+        // choice == 1: "Log out"
         if (ui_confirm("Log out of Dropbox?")) {
             auth_delete_tokens();
             memset(tokens, 0, sizeof(*tokens));
@@ -1329,11 +1307,28 @@ int main(void) {
                 continue;
             }
 
-            // choice is an index into state.visible (3..visibleCount+2),
+            if (choice == 3) {
+                // Blank submission clears the filter instead of being
+                // rejected as "empty" -- see swkbd_get_text()'s allowEmpty
+                // param -- so this one tile covers both setting and
+                // clearing a search, no separate "Clear search" entry
+                // needed. Pre-filled with the current query (if any) so
+                // clearing it is just deleting the existing text rather
+                // than remembering to retype nothing.
+                char query[64];
+                snprintf(query, sizeof(query), "%s", state.searchQuery);
+                if (swkbd_get_text("Search games (blank clears)", query, sizeof(query), true)) {
+                    snprintf(state.searchQuery, sizeof(state.searchQuery), "%s", query);
+                    refresh_visible(&state);
+                }
+                continue;
+            }
+
+            // choice is an index into state.visible (4..visibleCount+3),
             // not state.titles directly -- state.visible[] is what maps
             // back to a real title when the extdata filter (SELECT) has
-            // hidden some, offset by 3 for the three reserved tiles above.
-            int titleIndex = (int)state.visible[choice - 3];
+            // hidden some, offset by 4 for the four reserved tiles above.
+            int titleIndex = (int)state.visible[choice - 4];
             show_game_detail(&state, &tokens, titleIndex);
             // Picks up newly-created Checkpoint backups and any title
             // list changes (cart swap, freshly installed game) each time

@@ -87,15 +87,44 @@ static Result read_icon_file(u64 titleId, FS_MediaType media, u8 *iconData) {
     return 0;
 }
 
-// Converts a NUL-terminated UTF-16 field to plain ASCII: printable
-// characters pass through, everything else becomes '?'. Not a real
-// Unicode->console-font mapping, just enough to avoid printing garbage
-// multi-byte sequences through a text renderer with no Unicode font.
+// Transliterates the Latin-1 Supplement's accented letters (U+00C0-U+00FF,
+// the ones actually common in the mostly-English/Spanish/Portuguese/French
+// game titles this reads) to their plain-ASCII base letter -- 'e' for
+// both 'e'/'é'/'è'/'ê'/'ë', etc. Returns 0 for anything outside that block
+// (including the punctuation/multiplication-sign gaps within it), which
+// utf16_field_to_ascii() below then falls back to '?' for, same as before
+// this existed. Without this, a title like "Pokémon" became "Pok?mon" --
+// not just a cosmetic wart, since the icon grid's search tile matches
+// against this same converted string, so searching "pokemon" could never
+// find it.
+static char latin1_accent_to_ascii(u16 c) {
+    // Index i is codepoint (base + i); the embedded '\0's line up with the
+    // two non-letter codepoints in these ranges (multiplication/division
+    // signs) and correctly fall through to utf16_field_to_ascii()'s '?'.
+    static const char upper[] = "AAAAAAACEEEEIIIIDNOOOOO\0OUUUUYP"; // U+00C0-DE: ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞ
+    static const char lower[] = "saaaaaaaceeeeiiiidnooooo\0ouuuuypy"; // U+00DF-FF: ßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ
+    if (c >= 0xC0 && c <= 0xDE) return upper[c - 0xC0];
+    if (c >= 0xDF && c <= 0xFF) return lower[c - 0xDF];
+    return 0;
+}
+
+// Converts a NUL-terminated UTF-16 field to plain ASCII: printable ASCII
+// characters pass through, common Latin accented letters are stripped to
+// their base letter (see latin1_accent_to_ascii()), everything else
+// becomes '?'. Not a real Unicode->console-font mapping, just enough to
+// avoid printing garbage multi-byte sequences through a text renderer
+// with no Unicode font, while keeping accented titles searchable/readable
+// as their plain-letter spelling instead of full of '?'.
 static void utf16_field_to_ascii(const u16 *in, size_t inMaxChars, char *out, size_t outSize) {
     size_t o = 0;
     for (size_t i = 0; i < inMaxChars && in[i] != 0 && o + 1 < outSize; i++) {
         u16 c = in[i];
-        out[o++] = (c >= 0x20 && c <= 0x7E) ? (char)c : '?';
+        if (c >= 0x20 && c <= 0x7E) {
+            out[o++] = (char)c;
+            continue;
+        }
+        char accented = latin1_accent_to_ascii(c);
+        out[o++] = accented ? accented : '?';
     }
     out[o] = '\0';
 }
