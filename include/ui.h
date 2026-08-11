@@ -157,6 +157,13 @@ bool ui_is_email_hidden(void);
 #define UI_GRID_TOGGLE_EXTDATA  (-5)
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata);
 
+// The app's own splash screen -- big centered "KONNECT3DS" + a tagline,
+// held for `frames` vblanks (skippable early with A/B/START, same
+// contract as ui_wait_briefly()) and self-fading out over its last
+// fifteen frames. Meant to be the very first thing shown on launch,
+// before there's a login gate or icon grid to show yet.
+void ui_show_splash(int frames);
+
 // Big centered "Log in to Dropbox" prompt, shown before the icon grid the
 // first time the app isn't logged in yet. Blocks until A (returns true,
 // caller should then run the actual login flow) or START (returns false,

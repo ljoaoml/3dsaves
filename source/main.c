@@ -1219,6 +1219,8 @@ int main(void) {
     http_init();
     sound_init(); // best-effort -- see sound.h, a no-op everywhere if this fails
 
+    ui_show_splash(90); // ~1.5s at 60fps, skippable with A/B/START
+
     mkdir("sdmc:/3ds", 0777); // may already exist (it's the standard homebrew folder); ignore failure
     mkdir("sdmc:/3ds/Konnect3DS", 0777);
     load_backed_up_marks();

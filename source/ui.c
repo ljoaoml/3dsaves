@@ -58,6 +58,11 @@
 #define ICON_GRID_Y (HEADER_BAR_HEIGHT + 10.0f)
 #define ICON_CAPTION_HEIGHT 22.0f
 
+// How many drawn frames the grid's fade-in overlay (see draw_icon_grid())
+// takes to fully clear -- 12 frames is ~200ms at 60fps, long enough to
+// read as a deliberate transition without feeling like a delay.
+#define GRID_FADE_IN_FRAMES 12
+
 // Cleared once per present() (confirmed against devkitPro's own
 // system-font example: C2D_TextBufClear() is called once per frame, not
 // once per C2D_TextParse() -- multiple texts safely share one buffer
@@ -177,7 +182,10 @@ static struct {
     int count; // 1 + title count
     int cols;
     int selected;
-    int scrollRow;
+    int scrollRow;      // target row, from the clamping logic in ui_run_icon_grid()
+    float scrollOffset;  // visual row position -- eases toward scrollRow each drawn frame (draw_icon_grid())
+    float pressAnim;     // 0..1 "just pressed A" flash on the selected tile, see draw_icon_grid()
+    int fadeFrame;        // counts up each drawn frame from the start of ui_run_icon_grid(); drives the fade-in overlay
     ui_menu_label_fn getLabel;
     void *userdata;
 } s_grid;
@@ -362,6 +370,29 @@ static void draw_scroll_caret(float cy, bool pointsUp, u32 color) {
     }
 }
 
+// A filled rounded rectangle, built from citro2d's plain primitives --
+// there's no rounded-rect primitive in citro2d itself. A "plus" shape
+// (one rect spanning full height but inset left/right by `radius`, one
+// spanning full width but inset top/bottom) covers everywhere except the
+// 4 corners, then a filled circle of that same radius at each corner
+// finishes it -- the standard rect+4-circles construction for this.
+// `radius` is clamped to half the smaller dimension so it can't turn a
+// small/thin rect inside-out.
+static void draw_rounded_rect(float x, float y, float w, float h, float radius, u32 color) {
+    float maxR = (w < h ? w : h) * 0.5f;
+    if (radius > maxR) radius = maxR;
+    if (radius < 0.0f) radius = 0.0f;
+
+    C2D_DrawRectSolid(x + radius, y, 0.0f, w - 2.0f * radius, h, color);
+    C2D_DrawRectSolid(x, y + radius, 0.0f, w, h - 2.0f * radius, color);
+    if (radius > 0.0f) {
+        C2D_DrawCircleSolid(x + radius, y + radius, 0.0f, radius, color);
+        C2D_DrawCircleSolid(x + w - radius, y + radius, 0.0f, radius, color);
+        C2D_DrawCircleSolid(x + radius, y + h - radius, 0.0f, radius, color);
+        C2D_DrawCircleSolid(x + w - radius, y + h - radius, 0.0f, radius, color);
+    }
+}
+
 // The icon grid itself: tiles 0/1/2 are always the three reserved
 // folder-style tiles, tiles 3..s_grid.count-1 are title icons (see
 // ui_set_home_icons()) -- this is the top screen's actual page content
@@ -375,6 +406,16 @@ static void draw_icon_grid(void) {
     int cols = s_grid.cols;
     int visibleRows = grid_visible_rows();
     float step = ICON_TILE_SIZE + ICON_TILE_GAP;
+
+    // Eases the visual scroll position toward the target row (s_grid.scrollRow,
+    // set by ui_run_icon_grid()'s clamping logic) each drawn frame -- this
+    // function is now called every idle frame, not just once per input
+    // decision (see ui_run_icon_grid()), so a multi-row jump (L/R paging,
+    // wrap-around) glides instead of snapping straight to the target.
+    s_grid.scrollOffset += ((float)s_grid.scrollRow - s_grid.scrollOffset) * 0.3f;
+    if (fabsf((float)s_grid.scrollRow - s_grid.scrollOffset) < 0.02f) {
+        s_grid.scrollOffset = (float)s_grid.scrollRow;
+    }
 
     // A slow "breathing" pulse on the selected tile's highlight -- purely
     // cosmetic. Driven by a persistent counter incremented once per call
@@ -390,21 +431,29 @@ static void draw_icon_grid(void) {
     // hour rather than a real jump cut.
     s_pulseFrame = (s_pulseFrame + 1) % 100000;
     float pulse = 0.5f + 0.5f * sinf((float)s_pulseFrame * 0.08f); // 0..1, ~1.3s period at 60fps
-    float highlightPad = 4.0f + pulse * 2.0f;               // 4..6px frame around the tile
-    u8 highlightAlpha = (u8)(170.0f + pulse * 85.0f);        // 170..255
-    u32 highlightColor = C2D_Color32(0x58, 0x54, 0xC1, highlightAlpha); // COLOR_SELECT_BG's RGB, animated alpha
+    // s_grid.pressAnim (see ui_run_icon_grid()'s KEY_A handling) briefly
+    // boosts both on top of the ambient pulse right after A is pressed,
+    // for a quick "confirm" flash before the tile's actually opened.
+    float highlightPad = 4.0f + pulse * 2.0f + s_grid.pressAnim * 3.0f;       // 4..6px, +0..3px on press
+    float highlightAlphaF = 170.0f + pulse * 85.0f + s_grid.pressAnim * 60.0f; // 170..255, +0..60 on press
+    if (highlightAlphaF > 255.0f) highlightAlphaF = 255.0f;
+    u32 highlightColor = C2D_Color32(0x58, 0x54, 0xC1, (u8)highlightAlphaF); // COLOR_SELECT_BG's RGB, animated alpha
 
     for (int i = 0; i < s_grid.count; i++) {
         int row = i / cols;
-        if (row < s_grid.scrollRow || row >= s_grid.scrollRow + visibleRows) continue;
+        // Slack of 1 row on each side of the culling window (rather than
+        // exactly [scrollOffset, scrollOffset+visibleRows)) so a tile
+        // scrolling into or out of view still draws while the offset is
+        // mid-animation, instead of popping in right at the edge.
+        if ((float)row < s_grid.scrollOffset - 1.0f || (float)row > s_grid.scrollOffset + (float)visibleRows) continue;
         int col = i % cols;
         float x = MARGIN_X + col * step;
-        float y = ICON_GRID_Y + (row - s_grid.scrollRow) * step;
+        float y = ICON_GRID_Y + ((float)row - s_grid.scrollOffset) * step;
 
         if (i == s_grid.selected) {
-            C2D_DrawRectSolid(x - highlightPad, y - highlightPad, 0.0f,
+            draw_rounded_rect(x - highlightPad, y - highlightPad,
                                ICON_TILE_SIZE + highlightPad * 2.0f, ICON_TILE_SIZE + highlightPad * 2.0f,
-                               highlightColor);
+                               8.0f, highlightColor);
         }
 
         if (i == 0 || i == 1 || i == 2) {
@@ -456,6 +505,23 @@ static void draw_icon_grid(void) {
             float captionY = TOP_H - MARGIN_Y - ICON_CAPTION_HEIGHT + 4.0f;
             draw_text(MARGIN_X, captionY, TEXT_SCALE, COLOR_ACCENT, caption, true);
         }
+    }
+
+    // Fades the whole top screen in from the background color over the
+    // first GRID_FADE_IN_FRAMES frames of each ui_run_icon_grid() call --
+    // makes returning to the home screen (the single most common
+    // transition in this app -- every sub-screen leads back here) read as
+    // a deliberate transition instead of an instant hard cut. Drawn last
+    // so it covers draw_top_header() too (called before this in
+    // present()), not just the grid itself. The RGB come straight from
+    // COLOR_BG (mask off its alpha byte, splice in this frame's own) so
+    // this always matches the real background color, not a duplicated
+    // literal that could drift out of sync with ui_init()'s palette.
+    if (s_grid.fadeFrame < GRID_FADE_IN_FRAMES) {
+        float t = 1.0f - (float)s_grid.fadeFrame / (float)GRID_FADE_IN_FRAMES;
+        u32 fadeColor = (COLOR_BG & 0x00FFFFFFu) | ((u32)(t * 255.0f) << 24);
+        C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, TOP_W, TOP_H, fadeColor);
+        s_grid.fadeFrame++;
     }
 }
 
@@ -842,6 +908,9 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
     s_grid.cols = grid_cols();
     if (s_grid.selected >= s_grid.count) s_grid.selected = 0;
     s_grid.scrollRow = 0;
+    s_grid.scrollOffset = 0.0f; // fresh session -- no scroll animation on first appearance, only for in-session moves
+    s_grid.pressAnim = 0.0f;
+    s_grid.fadeFrame = 0;
     s_grid.getLabel = get_label;
     s_grid.userdata = userdata;
     s_topMode = TOP_GRID;
@@ -855,10 +924,15 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
         if (selRow < s_grid.scrollRow) s_grid.scrollRow = selRow;
         if (selRow >= s_grid.scrollRow + visibleRows) s_grid.scrollRow = selRow - visibleRows + 1;
 
-        ui_flush();
-
+        // Redrawn every idle frame now (not just once per input decision,
+        // which the loop used to do) so the pulse highlight, scroll
+        // easing and fade-in (see draw_icon_grid()) actually animate
+        // continuously while sitting idle, instead of only advancing
+        // once each time a key happens to get pressed -- same
+        // draw-then-wait-for-vblank shape ui_run_login_gate() already uses.
         bool decided = false;
         while (!decided) {
+            ui_flush();
             hidScanInput();
             u32 kDown = hidKeysDown();
             if (kDown & KEY_RIGHT) {
@@ -890,8 +964,20 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
                 int next = s_grid.selected - visibleRows * s_grid.cols;
                 s_grid.selected = next >= 0 ? next : 0;
                 decided = true;
-            } else if (kDown & KEY_A) { result = s_grid.selected; goto done; }
-            else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
+            } else if (kDown & KEY_A) {
+                // A brief "confirm" flash on the selected tile (see
+                // draw_icon_grid()'s use of s_grid.pressAnim) before
+                // actually committing the pick -- still drawn through
+                // ui_flush() each of these frames, so the background/
+                // header/footer stay exactly as they were.
+                for (int f = 0; f < 6; f++) {
+                    s_grid.pressAnim = (float)(f + 1) / 6.0f;
+                    ui_flush();
+                    gspWaitForVBlank();
+                }
+                result = s_grid.selected;
+                goto done;
+            } else if (kDown & KEY_B) { result = UI_GRID_CANCEL; goto done; }
             else if (kDown & KEY_START) { result = UI_GRID_EXIT; goto done; }
             else if (kDown & KEY_X) { result = UI_GRID_ACCOUNT; goto done; }
             else if (kDown & KEY_Y) { result = UI_GRID_BACKUP_ALL; goto done; }
@@ -903,6 +989,48 @@ int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
 done:
     s_topMode = TOP_LOG;
     return result;
+}
+
+// The very first thing shown on launch (see main()) -- big centered app
+// name, held for `frames` vblanks (skippable with A/B/START, same
+// contract as ui_wait_briefly()) and self-fading to the background color
+// over its last FADE_OUT_FRAMES frames so the handoff into the login
+// gate/icon grid right after reads as a transition rather than a hard
+// cut. Doesn't go through present()/s_topMode+s_bottomMode, same reason
+// as ui_run_login_gate() right below: there's no log/menu/grid state to
+// show yet, so this just draws both screens directly in its own loop.
+void ui_show_splash(int frames) {
+    const int fadeOutFrames = 15;
+    for (int i = 0; i < frames; i++) {
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C2D_TextBufClear(s_textBuf);
+
+        C2D_TargetClear(s_top, COLOR_BG);
+        C2D_SceneBegin(s_top);
+        draw_background(TOP_W, TOP_H, false);
+        draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f - 16.0f, 1.1f, COLOR_ACCENT,
+                           "KONNECT3DS", true, C2D_AlignCenter);
+        draw_text_aligned(TOP_W / 2.0f, TOP_H / 2.0f + 20.0f, TEXT_SCALE, COLOR_MUTED,
+                           "Game saves, backed up to Dropbox", false, C2D_AlignCenter);
+        if (i >= frames - fadeOutFrames) {
+            float t = (float)(i - (frames - fadeOutFrames)) / (float)fadeOutFrames;
+            if (t < 0.0f) t = 0.0f; // frames < fadeOutFrames: fading from the very first drawn frame
+            if (t > 1.0f) t = 1.0f;
+            u32 fadeColor = (COLOR_BG & 0x00FFFFFFu) | ((u32)(t * 255.0f) << 24);
+            C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, TOP_W, TOP_H, fadeColor);
+        }
+
+        C2D_TargetClear(s_bottom, COLOR_BG);
+        C2D_SceneBegin(s_bottom);
+        draw_background(BOTTOM_W, BOTTOM_H, true);
+
+        C3D_FrameEnd(0);
+
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+        if (kDown & (KEY_A | KEY_B | KEY_START)) break;
+        gspWaitForVBlank();
+    }
 }
 
 // Doesn't go through present()/s_topMode+s_bottomMode: this is the very
