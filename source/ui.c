@@ -85,10 +85,14 @@ static bool s_bgLoaded;
 static C2D_SpriteSheet s_folderIconSheet;
 static C2D_Image s_folderIcon;
 static bool s_folderIconLoaded;
-// The real Konnect3DS logo lockup (icon + wordmark), same artwork already
-// used for the app's HOME menu banner (resources/banner.png) -- shown on
-// the boot splash (ui_show_splash()) instead of a plain drawn text title.
-// Same optional-load contract as the background/folder icon above.
+// The Konnect3DS logo lockup (icon + wordmark), shown on the boot splash
+// (ui_show_splash()) instead of a plain drawn text title. Derived from the
+// app's HOME menu banner (resources/banner.png) with its flat purple
+// backing color chroma-keyed out into a real alpha channel (gfx/logo.png)
+// -- that source file is a fixed-size banner meant to fully fill its own
+// HOME menu cell, so it was never meant to float over this screen's own
+// background/pattern as-is. Same optional-load contract as the
+// background/folder icon above.
 static C2D_SpriteSheet s_logoSheet;
 static C2D_Image s_logoImage;
 static bool s_logoLoaded;
@@ -1000,15 +1004,15 @@ done:
     return result;
 }
 
-// The very first thing shown on launch (see main()) -- the real Konnect3DS
-// logo (romfs:/gfx/logo.t3x, built from resources/banner.png -- the same
-// artwork already used for the app's HOME menu banner, so the boot splash
-// and the HOME menu entry show the same lockup instead of a plain drawn
-// title), held for `frames` vblanks (skippable with A/B/START, same
-// contract as ui_wait_briefly()) and self-fading to the background color
-// over its last FADE_OUT_FRAMES frames so the handoff into the login
-// gate/icon grid right after reads as a transition rather than a hard
-// cut. Doesn't go through present()/s_topMode+s_bottomMode, same reason
+// The very first thing shown on launch (see main()) -- the Konnect3DS logo
+// (romfs:/gfx/logo.t3x, see s_logoImage's comment for how it's derived
+// from the HOME menu banner art with a real alpha channel instead of a
+// flat purple backing) drawn over this screen's own background/pattern,
+// held for `frames` vblanks (skippable with A/B/START, same contract as
+// ui_wait_briefly()) and self-fading to the background color over its
+// last FADE_OUT_FRAMES frames so the handoff into the login gate/icon
+// grid right after reads as a transition rather than a hard cut. Doesn't
+// go through present()/s_topMode+s_bottomMode, same reason
 // as ui_run_login_gate() right below: there's no log/menu/grid state to
 // show yet, so this just draws both screens directly in its own loop.
 void ui_show_splash(int frames) {
