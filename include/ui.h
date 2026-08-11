@@ -57,6 +57,17 @@ void ui_wait_briefly(int frames);
 void ui_print_success(const char *text);
 void ui_print_error(const char *text);
 
+// Updates a single top-screen status line in place instead of appending a
+// new log line every call -- for a percentage counter that changes many
+// times a second (e.g. "Uploading... 42%") without flooding the scrolling
+// log with one line per update. `text` must not contain '\n'. Flushes
+// immediately (same as every other ui_print* call), so the caller doesn't
+// need its own ui_flush() after this. The next ui_clear()/ui_print()/
+// ui_printf()/ui_print_success()/ui_print_error() ends the "replaceable"
+// streak -- a normal log line right after a progress sequence still
+// appends as its own line, not overwrites it.
+void ui_print_progress(const char *text);
+
 // Top-screen colored title + underline (e.g. for a screen's heading).
 void ui_print_header(const char *title);
 

@@ -83,6 +83,31 @@ static void mark_backed_up(u64 titleId) {
 // existing Checkpoint backup by hand is just "open the picker, pick the
 // game, confirm" instead of hunting across the whole SD card.
 
+// Shared progress-bar plumbing for every upload/extract call below.
+// `label` is the operation's name (e.g. "Uploading to Dropbox",
+// "Extracting"); `lastPercent` starts at -1 so the very first callback
+// (0%) is never skipped as "unchanged". report_progress() matches both
+// HttpProgressFn (http.h) and ZipProgressFn (minizip_reader.h) -- u32 and
+// uint32_t are the same underlying type on this platform, so one function
+// serves both without a wrapper each. Only redraws when the whole
+// percentage actually changes, since the underlying callbacks can fire
+// far more often (once per TLS write, once per 4KB zip chunk) than the
+// number on screen does.
+typedef struct {
+    const char *label;
+    int lastPercent;
+} ProgressState;
+
+static void report_progress(u32 bytesDone, u32 bytesTotal, void *userdata) {
+    ProgressState *st = (ProgressState *)userdata;
+    int pct = bytesTotal > 0 ? (int)(((u64)bytesDone * 100) / bytesTotal) : 100;
+    if (pct == st->lastPercent) return;
+    st->lastPercent = pct;
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%s... %d%%", st->label, pct);
+    ui_print_progress(msg);
+}
+
 typedef struct {
     InstalledTitle *titles;
     u32 titleCount;
@@ -326,14 +351,16 @@ static void upload_local_backup(MenuState *state, DropboxTokens *tokens, int tit
         return;
     }
 
-    ui_print("Save extracted. Uploading to Dropbox...\n");
+    ui_print("Save extracted.\n");
     ui_flush();
 
     char dropboxPath[192];
     dropbox_build_backup_path(gameName, label, dropboxPath, sizeof(dropboxPath));
 
+    ProgressState progress = { "Uploading to Dropbox", -1 };
     char error[256];
-    bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+    bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath,
+                                   report_progress, &progress, error, sizeof(error));
 
     remove(TMP_ZIP_PATH);
 
@@ -429,10 +456,8 @@ static void download_and_prepare_restore(MenuState *state, DropboxTokens *tokens
     snprintf(destDir, sizeof(destDir), "%s/0x%05X %s/%s", destRoot,
              (unsigned int)((u32)t->titleId >> 8), safeGameName, label);
 
-    ui_print("Extracting...\n");
-    ui_flush();
-
-    ok = zipr_extract_all(TMP_ZIP_PATH, destDir);
+    ProgressState extractProgress = { "Extracting", -1 };
+    ok = zipr_extract_all(TMP_ZIP_PATH, destDir, report_progress, &extractProgress);
     remove(TMP_ZIP_PATH);
 
     if (ok) {
@@ -544,8 +569,10 @@ static void backup_all_titles(MenuState *state, DropboxTokens *tokens) {
         if (ok) {
             char dropboxPath[192];
             dropbox_build_backup_path(gameName, timestamp, dropboxPath, sizeof(dropboxPath));
+            ProgressState progress = { "Uploading to Dropbox", -1 };
             char error[256];
-            ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+            ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath,
+                                      report_progress, &progress, error, sizeof(error));
             remove(TMP_ZIP_PATH);
         }
 
@@ -625,14 +652,13 @@ static void import_and_upload(MenuState *state, DropboxTokens *tokens) {
         return;
     }
 
-    ui_print("Uploading to Dropbox...\n");
-    ui_flush();
-
     char dropboxPath[192];
     dropbox_build_game_path(gameName, dropboxPath, sizeof(dropboxPath));
 
+    ProgressState progress = { "Uploading to Dropbox", -1 };
     char error[256];
-    bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+    bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath,
+                                   report_progress, &progress, error, sizeof(error));
 
     remove(TMP_ZIP_PATH);
 
@@ -729,14 +755,13 @@ static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *token
             continue;
         }
 
-        ui_print("Save extracted. Uploading to Dropbox...\n");
-        ui_flush();
-
         char dropboxPath[192];
         dropbox_build_backup_path(gameName, instances[choice].name, dropboxPath, sizeof(dropboxPath));
 
+        ProgressState progress = { "Uploading to Dropbox", -1 };
         char error[256];
-        bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+        bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath,
+                                       report_progress, &progress, error, sizeof(error));
         remove(TMP_ZIP_PATH);
 
         if (ok) {
@@ -861,9 +886,6 @@ static void show_other_apps_picker(DropboxTokens *tokens) {
             continue;
         }
 
-        ui_print("Save extracted. Uploading to Dropbox...\n");
-        ui_flush();
-
         char timestamp[64];
         time_t now = time(NULL);
         struct tm *tmNow = localtime(&now);
@@ -873,8 +895,10 @@ static void show_other_apps_picker(DropboxTokens *tokens) {
         char dropboxPath[192];
         dropbox_build_backup_path(gameName, timestamp, dropboxPath, sizeof(dropboxPath));
 
+        ProgressState progress = { "Uploading to Dropbox", -1 };
         char error[256];
-        bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath, error, sizeof(error));
+        bool ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath,
+                                       report_progress, &progress, error, sizeof(error));
         remove(TMP_ZIP_PATH);
 
         if (ok) {
@@ -984,6 +1008,15 @@ int main(void) {
     mkdir("sdmc:/3ds/Konnect3DS", 0777);
     load_backed_up_marks();
 
+    // First thing drawn after launch -- auth_load_tokens() below is a
+    // near-instant local file read, so without this the screen would
+    // otherwise sit blank for a moment with nothing to say the app is
+    // actually doing something (and not, say, frozen) before either the
+    // grid or the login gate shows up.
+    ui_clear();
+    ui_print("Checking for a saved Dropbox login...\n");
+    ui_wait_briefly(30); // ~0.5s, skippable with A/B/START
+
     DropboxTokens tokens;
     MenuState state = {0};
     state.loggedIn = auth_load_tokens(&tokens);
@@ -998,7 +1031,9 @@ int main(void) {
     while (!wantExit) {
         while (!state.loggedIn) {
             if (!ui_run_login_gate()) { wantExit = true; break; }
-            state.loggedIn = auth_run_login_flow(&tokens);
+            bool loginWantExit = false;
+            state.loggedIn = auth_run_login_flow(&tokens, &loginWantExit);
+            if (loginWantExit) { wantExit = true; break; } // START pressed mid-flow
             if (!state.loggedIn) {
                 ui_clear();
                 ui_print_error("Login cancelled or failed.\n");

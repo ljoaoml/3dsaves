@@ -1,6 +1,5 @@
 #include "minizip_reader.h"
 
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -36,7 +35,35 @@ static void mkdir_p(const char *path) {
     mkdir(buf, 0777);
 }
 
-bool zipr_extract_all(const char *zipPath, const char *destDir) {
+// Sums compSize across every STORE entry in the central directory starting
+// at the file's current position, leaving the file position wherever it
+// ends up (the caller re-seeks to cdOffset before the real extraction
+// pass) -- only ever called when a progress callback is actually in play,
+// since it costs one extra pass over the (small) central directory
+// headers. Returns false on any parse error, same failure contract as the
+// real extraction loop below.
+static bool sum_store_bytes(FILE *f, uint16_t totalEntries, uint32_t *totalOut) {
+    uint32_t total = 0;
+    for (uint16_t i = 0; i < totalEntries; i++) {
+        uint8_t cdh[CDH_FIXED_LEN];
+        if (fread(cdh, 1, sizeof(cdh), f) != sizeof(cdh)) return false;
+        if (get_u32(cdh) != CDH_SIG) return false;
+
+        uint16_t method = get_u16(cdh + 10);
+        uint32_t compSize = get_u32(cdh + 20);
+        uint16_t nameLen = get_u16(cdh + 28);
+        uint16_t extraLen = get_u16(cdh + 30);
+        uint16_t commentLen = get_u16(cdh + 32);
+
+        if (method == 0) total += compSize;
+        if (fseek(f, nameLen + extraLen + commentLen, SEEK_CUR) != 0) return false;
+    }
+    *totalOut = total;
+    return true;
+}
+
+bool zipr_extract_all(const char *zipPath, const char *destDir,
+                       ZipProgressFn onProgress, void *userdata) {
     FILE *f = fopen(zipPath, "rb");
     if (!f) return false;
 
@@ -56,9 +83,18 @@ bool zipr_extract_all(const char *zipPath, const char *destDir) {
     uint16_t totalEntries = get_u16(eocd + 10);
     uint32_t cdOffset = get_u32(eocd + 16);
 
+    uint32_t totalBytes = 0;
+    if (onProgress) {
+        if (fseek(f, (long)cdOffset, SEEK_SET) != 0) { fclose(f); return false; }
+        if (!sum_store_bytes(f, totalEntries, &totalBytes)) { fclose(f); return false; }
+        onProgress(0, totalBytes, userdata);
+    }
+
     if (fseek(f, (long)cdOffset, SEEK_SET) != 0) { fclose(f); return false; }
 
     mkdir_p(destDir);
+
+    uint32_t bytesDone = 0;
 
     for (uint16_t i = 0; i < totalEntries; i++) {
         uint8_t cdh[CDH_FIXED_LEN];
@@ -112,6 +148,8 @@ bool zipr_extract_all(const char *zipPath, const char *destDir) {
                             if (fread(buf, 1, chunk, f) != chunk) break;
                             fwrite(buf, 1, chunk, out);
                             remaining -= chunk;
+                            bytesDone += chunk;
+                            if (onProgress) onProgress(bytesDone, totalBytes, userdata);
                         }
                         fclose(out);
                     }

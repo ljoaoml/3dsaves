@@ -191,7 +191,7 @@ static bool parse_token_response(const char *json, DropboxTokens *tokens, bool k
     return true;
 }
 
-bool auth_run_login_flow(DropboxTokens *out) {
+bool auth_run_login_flow(DropboxTokens *out, bool *wantExit) {
     memset(out, 0, sizeof(*out));
 
     char verifier[128], challenge[128];
@@ -252,7 +252,7 @@ bool auth_run_login_flow(DropboxTokens *out) {
         ui_print_bottom("    picked up automatically, or\n");
         ui_print_bottom("4b. Press A here to type it in.\n\n");
     }
-    ui_print_bottom("(B to cancel)\n\n");
+    ui_print_bottom("(B to cancel, START to exit)\n\n");
     ui_print_bottom("Can't scan? Full URL:\n");
     print_bottom_wrapped(url);
     ui_flush();
@@ -278,6 +278,7 @@ bool auth_run_login_flow(DropboxTokens *out) {
         u32 kDown = hidKeysDown();
         if (kDown & KEY_B) { cancelled = true; break; }
         if (kDown & KEY_A) { wantManualEntry = true; break; }
+        if (kDown & KEY_START) { cancelled = true; *wantExit = true; break; }
 
         if (frame > 0 && frame % 30 == 0) { // ~every 0.5s at 60fps
             if (check_pasted_tokens_file(out)) {

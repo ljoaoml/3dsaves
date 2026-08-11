@@ -20,6 +20,15 @@ typedef struct {
     HttpBuffer body;
 } HttpResponse;
 
+// Optional progress callback for http_request_file_body() (see below):
+// called after each chunk written to the wire with cumulative bytes sent
+// so far and the total (request headers + body combined -- headers are a
+// few hundred bytes at most, negligible against any real upload, so this
+// is effectively "how much of the file has gone out" without needing to
+// track the two separately). May be called many times a second; keep it
+// cheap.
+typedef void (*HttpProgressFn)(u32 bytesDone, u32 bytesTotal, void *userdata);
+
 // Loads the bundled root CA certs from romfs. Call once after romfsInit().
 Result http_init(void);
 void http_exit(void);
@@ -85,9 +94,13 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
 // sizes, but a real streaming upload would need chunked/multi-part support
 // that httpc does not expose cleanly. Keep an eye on this for very large
 // (tens of MB) extdata saves.
+//
+// `onProgress`/`progressUserdata` are optional (NULL/NULL for none) -- see
+// HttpProgressFn above.
 Result http_request_file_body(HTTPC_RequestMethod method, const char *url,
                                const HttpHeader *headers, int header_count,
                                FILE *body_file, u32 body_size,
+                               HttpProgressFn onProgress, void *progressUserdata,
                                HttpResponse *out);
 
 void http_response_free(HttpResponse *resp);

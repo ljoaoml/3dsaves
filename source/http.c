@@ -478,8 +478,13 @@ static void tls_close(TlsConn *c) {
 
 // sentOut (optional) gets how many bytes actually went out even on
 // failure, so a caller can tell "nothing was ever sent" from "most of
-// the request went out, then it stalled/failed".
-static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, size_t *sentOut) {
+// the request went out, then it stalled/failed". onProgress (optional,
+// see HttpProgressFn) is called after every successful partial write with
+// cumulative bytes sent -- mbedtls_ssl_write() has no minimum chunk size
+// it's guaranteed to accept, so this can genuinely fire many times over
+// one request.
+static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, size_t *sentOut,
+                          HttpProgressFn onProgress, void *progressUserdata) {
     size_t off = 0;
     u64 start = osGetTime();
     while (off < len) {
@@ -497,6 +502,7 @@ static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, s
         }
         off += (size_t)ret;
         start = osGetTime(); // reset the deadline on forward progress
+        if (onProgress) onProgress((u32)off, (u32)len, progressUserdata);
     }
     if (sentOut) *sentOut = off;
     return 0;
@@ -605,6 +611,7 @@ static bool header_line_value(const char *line, const char *name, char *out, siz
 static Result do_single_request(HTTPC_RequestMethod method, const char *url,
                                  const HttpHeader *headers, int header_count,
                                  const u8 *body, u32 body_size,
+                                 HttpProgressFn onProgress, void *progressUserdata,
                                  char *redirect_out, size_t redirect_out_size,
                                  HttpResponse *out) {
     s_lastRequestBytesSent = -1;
@@ -690,7 +697,7 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     if (s_lastRawRequest.data) memcpy(s_lastRawRequest.data, req.data, req.size);
 
     size_t sent = 0;
-    int wret = tls_write_all(&conn.ssl, req.data, req.size, &sent);
+    int wret = tls_write_all(&conn.ssl, req.data, req.size, &sent, onProgress, progressUserdata);
     s_lastRequestBytesSent = (int)sent;
     free(req.data);
     if (wret != 0) {
@@ -907,10 +914,16 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     fclose(f);
 }
 
-Result http_request(HTTPC_RequestMethod method, const char *url,
-                     const HttpHeader *headers, int header_count,
-                     const u8 *body, u32 body_size,
-                     HttpResponse *out) {
+// Shared by the public http_request() (always NULL/NULL here) and
+// http_request_file_body() (may pass a real progress callback) -- the
+// only difference between them is whether do_single_request()'s writes
+// report progress, so the redirect-following loop itself only needs to
+// exist once.
+static Result http_request_ex(HTTPC_RequestMethod method, const char *url,
+                               const HttpHeader *headers, int header_count,
+                               const u8 *body, u32 body_size,
+                               HttpProgressFn onProgress, void *progressUserdata,
+                               HttpResponse *out) {
     if (!s_httpInited) return HTTP_ERR_BAD_URL;
     memset(out, 0, sizeof(*out));
 
@@ -921,6 +934,7 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
         char location[1024] = {0};
         Result rc = do_single_request(method, currentUrl, headers, header_count,
                                        body, body_size,
+                                       onProgress, progressUserdata,
                                        location, sizeof(location), out);
         if (rc == HTTP_REDIRECT_SENTINEL) {
             snprintf(currentUrl, sizeof(currentUrl), "%s", location);
@@ -933,9 +947,17 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
     return HTTP_ERR_TOO_MANY_REDIRECTS;
 }
 
+Result http_request(HTTPC_RequestMethod method, const char *url,
+                     const HttpHeader *headers, int header_count,
+                     const u8 *body, u32 body_size,
+                     HttpResponse *out) {
+    return http_request_ex(method, url, headers, header_count, body, body_size, NULL, NULL, out);
+}
+
 Result http_request_file_body(HTTPC_RequestMethod method, const char *url,
                                const HttpHeader *headers, int header_count,
                                FILE *body_file, u32 body_size,
+                               HttpProgressFn onProgress, void *progressUserdata,
                                HttpResponse *out) {
     if (!s_httpInited) return HTTP_ERR_BAD_URL;
     memset(out, 0, sizeof(*out));
@@ -948,7 +970,8 @@ Result http_request_file_body(HTTPC_RequestMethod method, const char *url,
         return HTTP_ERR_BAD_RESPONSE;
     }
 
-    Result rc = http_request(method, url, headers, header_count, buf, body_size, out);
+    Result rc = http_request_ex(method, url, headers, header_count, buf, body_size,
+                                 onProgress, progressUserdata, out);
     free(buf);
     return rc;
 }

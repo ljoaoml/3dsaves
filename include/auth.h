@@ -59,8 +59,13 @@ void auth_delete_tokens(void);
 // Runs the full interactive login: prints the authorize URL to the console,
 // opens the software keyboard for the user to paste the resulting code, and
 // exchanges it for tokens. Blocks until done or cancelled.
-// Returns true on success and fills `out`.
-bool auth_run_login_flow(DropboxTokens *out);
+// Returns true on success and fills `out`. If the user pressed START to
+// exit the app outright (rather than B, which just cancels back to the
+// login gate to try again), *wantExit is set true -- checked regardless
+// of the return value, since exiting is its own outcome, not a login
+// failure. *wantExit is only ever set to true, never reset to false, so
+// callers should initialize it themselves.
+bool auth_run_login_flow(DropboxTokens *out, bool *wantExit);
 
 // Refreshes the access token using the stored refresh token if it looks
 // expired (or unconditionally if force_refresh is true -- worth passing

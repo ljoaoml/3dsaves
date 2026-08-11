@@ -55,7 +55,8 @@ void dropbox_build_backup_path(const char *name, const char *label, char *out, s
 }
 
 bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
-                          const char *dropboxPath, char *errorOut, size_t errorOutSize) {
+                          const char *dropboxPath, HttpProgressFn onProgress, void *progressUserdata,
+                          char *errorOut, size_t errorOutSize) {
     if (errorOut && errorOutSize > 0) errorOut[0] = '\0';
 
     if (!auth_ensure_valid(tokens, false)) {
@@ -101,7 +102,8 @@ bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
         };
 
         rc = http_request_file_body(HTTPC_METHOD_POST, DROPBOX_UPLOAD_URL,
-                                     headers, 3, f, (u32)size, &resp);
+                                     headers, 3, f, (u32)size,
+                                     onProgress, progressUserdata, &resp);
         if (R_FAILED(rc)) {
             fclose(f);
             if (errorOut) snprintf(errorOut, errorOutSize, "network error (0x%08lX)", (unsigned long)rc);

@@ -137,6 +137,12 @@ typedef struct {
 #define MAX_LOG_LINES 200
 static LogLine s_topLines[MAX_LOG_LINES];
 static int s_topCount = 0;
+// True right after ui_print_progress() adds/updates the top log's last
+// line -- the next ui_print_progress() call overwrites it in place
+// instead of appending a new one; any other top-screen print resets this
+// (see their own bodies) so a normal log line is never overwritten by a
+// later progress update.
+static bool s_topLastLineIsProgress = false;
 static LogLine s_bottomLines[MAX_LOG_LINES];
 static int s_bottomCount = 0;
 
@@ -645,9 +651,12 @@ static void present(ui_top_draw_fn drawTop, void *topUserdata) {
 void ui_flush(void) { present(NULL, NULL); }
 void ui_flush_with_top(ui_top_draw_fn draw_top, void *userdata) { present(draw_top, userdata); }
 
-void ui_clear(void) { s_topCount = 0; }
+void ui_clear(void) { s_topCount = 0; s_topLastLineIsProgress = false; }
 
-void ui_print(const char *text) { log_append(s_topLines, &s_topCount, text, COLOR_TEXT); }
+void ui_print(const char *text) {
+    s_topLastLineIsProgress = false;
+    log_append(s_topLines, &s_topCount, text, COLOR_TEXT);
+}
 
 void ui_printf(const char *fmt, ...) {
     char buf[512];
@@ -658,8 +667,36 @@ void ui_printf(const char *fmt, ...) {
     ui_print(buf);
 }
 
-void ui_print_success(const char *text) { log_append(s_topLines, &s_topCount, text, COLOR_SUCCESS); }
-void ui_print_error(const char *text) { log_append(s_topLines, &s_topCount, text, COLOR_DANGER); }
+void ui_print_success(const char *text) {
+    s_topLastLineIsProgress = false;
+    log_append(s_topLines, &s_topCount, text, COLOR_SUCCESS);
+}
+void ui_print_error(const char *text) {
+    s_topLastLineIsProgress = false;
+    log_append(s_topLines, &s_topCount, text, COLOR_DANGER);
+}
+
+// Updates (or starts) a single "live status" line on the top screen's log
+// -- repeated calls overwrite the same line instead of appending a new
+// one each time, for something like a percentage counter that changes
+// many times a second without flooding the scrolling log. `text` must not
+// contain '\n' (a single line only, unlike ui_print()). Any of
+// ui_clear()/ui_print()/ui_printf()/ui_print_success()/ui_print_error()
+// ends the "replaceable" streak, so normal log lines that follow a
+// progress sequence still append as usual, not overwrite it.
+void ui_print_progress(const char *text) {
+    if (s_topLastLineIsProgress && s_topCount > 0) {
+        LogLine *dst = &s_topLines[s_topCount - 1];
+        size_t len = strlen(text);
+        size_t copyLen = len < sizeof(dst->text) - 1 ? len : sizeof(dst->text) - 1;
+        memcpy(dst->text, text, copyLen);
+        dst->text[copyLen] = '\0';
+    } else {
+        log_append_line(s_topLines, &s_topCount, text, COLOR_TEXT, LOG_TEXT, false);
+        s_topLastLineIsProgress = true;
+    }
+    ui_flush();
+}
 
 void ui_print_header(const char *title) {
     log_append_line(s_topLines, &s_topCount, title, COLOR_ACCENT, LOG_TEXT, true);
