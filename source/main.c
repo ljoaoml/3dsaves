@@ -596,7 +596,9 @@ static const char *display_name_for_folder(const char *folderPath) {
     return base;
 }
 
-static void import_and_upload(DropboxTokens *tokens) {
+static void mark_backed_up_by_unique_id(MenuState *state, u32 uniqueId);
+
+static void import_and_upload(MenuState *state, DropboxTokens *tokens) {
     char startDir[64];
     struct stat st;
     if (stat(CHECKPOINT_SAVES_DIR, &st) == 0 && S_ISDIR(st.st_mode)) {
@@ -635,6 +637,18 @@ static void import_and_upload(DropboxTokens *tokens) {
     remove(TMP_ZIP_PATH);
 
     if (ok) {
+        // If the picked folder was one of Checkpoint's own (its basename
+        // starts with the "0x%05X " unique-id prefix -- see
+        // CHECKPOINT_SAVES_DIR's comment), mark the matching installed
+        // title backed up too, same as picking the same folder via the
+        // "Checkpoint" tile instead would.
+        const char *base = strrchr(pickedPath, '/');
+        base = base ? base + 1 : pickedPath;
+        unsigned int parsedId = 0;
+        if (sscanf(base, "0x%5X ", &parsedId) == 1) {
+            mark_backed_up_by_unique_id(state, parsedId);
+        }
+
         char msg[224];
         snprintf(msg, sizeof(msg), "\nUploaded to Dropbox: %s\n", dropboxPath);
         ui_print_success(msg);
@@ -759,19 +773,32 @@ static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *token
 static void show_checkpoint_browser(MenuState *state, DropboxTokens *tokens) {
     static CheckpointTitleFolder folders[MAX_CHECKPOINT_TITLE_FOLDERS + 1];
     int count = 0;
+    checkpoint_list_title_folders(folders, MAX_CHECKPOINT_TITLE_FOLDERS, &count);
 
     char cardGameCode[8], cardDescription[64];
     if (saves_detect_ds_card(cardGameCode, sizeof(cardGameCode), cardDescription, sizeof(cardDescription))) {
-        CheckpointTitleFolder *f = &folders[count++];
-        snprintf(f->name, sizeof(f->name), "%s %s", cardGameCode, cardDescription);
-        snprintf(f->fullPath, sizeof(f->fullPath), "%s/%s %s", CHECKPOINT_SAVES_DIR, cardGameCode, cardDescription);
-        f->uniqueId = 0;
-        f->isInsertedCartridge = true;
-    }
+        char cardPath[512];
+        snprintf(cardPath, sizeof(cardPath), "%s/%s %s", CHECKPOINT_SAVES_DIR, cardGameCode, cardDescription);
 
-    int scanned = 0;
-    checkpoint_list_title_folders(folders + count, MAX_CHECKPOINT_TITLE_FOLDERS, &scanned);
-    count += scanned;
+        // If this cart's already been backed up via Checkpoint before, the
+        // scan above already found its folder -- tag that existing entry
+        // instead of listing the same folder twice.
+        bool alreadyListed = false;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(folders[i].fullPath, cardPath) == 0) {
+                folders[i].isInsertedCartridge = true;
+                alreadyListed = true;
+                break;
+            }
+        }
+        if (!alreadyListed) {
+            CheckpointTitleFolder *f = &folders[count++];
+            snprintf(f->name, sizeof(f->name), "%s %s", cardGameCode, cardDescription);
+            snprintf(f->fullPath, sizeof(f->fullPath), "%s", cardPath);
+            f->uniqueId = 0;
+            f->isInsertedCartridge = true;
+        }
+    }
 
     if (count == 0) {
         ui_clear();
@@ -1019,7 +1046,7 @@ int main(void) {
             }
 
             if (choice == 0) {
-                import_and_upload(&tokens);
+                import_and_upload(&state, &tokens);
                 refresh_titles(&state);
                 continue;
             }
