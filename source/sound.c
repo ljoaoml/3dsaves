@@ -9,11 +9,17 @@
 // was written in -- see README/CLAUDE notes on that constraint) -- the
 // ndspWaveBuf field names/shape here match every published libctru audio
 // example (3ds-examples' audio/sfx, ctrmus, ...): a union data pointer +
-// nsamples + looping are the only fields callers set, everything else is
-// zeroed and left for ndsp itself to manage. If a build ever reports a
-// field mismatch here, that's the first thing to check.
+// nsamples + looping are the only fields callers set (status/sequence_id/
+// etc. are internal, only ever read back via wb->status below, never
+// written by this file). If a build ever reports a field mismatch here,
+// that's the first thing to check.
 #define SOUND_SAMPLE_RATE 22050
 #define SOUND_CHANNEL 0
+
+// Not <math.h>'s M_PI: that's a common extension, not guaranteed by the
+// C standard itself, and this file can't be compile-tested here to find
+// out whether this newlib config defines it.
+#define SOUND_PI 3.14159265358979323846f
 
 static bool s_soundInited = false;
 static s16 *s_successBuf = NULL;
@@ -31,7 +37,7 @@ static void fill_tone(s16 *buf, u32 numSamples, float freqHz, float amplitude) {
         float env = 1.0f;
         if (i < fadeSamples) env = (float)i / (float)fadeSamples;
         else if (i > numSamples - fadeSamples) env = (float)(numSamples - i) / (float)fadeSamples;
-        buf[i] = (s16)(amplitude * env * sinf(2.0f * (float)M_PI * freqHz * t) * 30000.0f);
+        buf[i] = (s16)(amplitude * env * sinf(2.0f * SOUND_PI * freqHz * t) * 30000.0f);
     }
 }
 
@@ -61,6 +67,7 @@ void sound_init(void) {
     Result rc = ndspInit();
     if (R_FAILED(rc)) return;
 
+    ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnReset(SOUND_CHANNEL);
     ndspChnSetInterp(SOUND_CHANNEL, NDSP_INTERP_LINEAR);
     ndspChnSetRate(SOUND_CHANNEL, SOUND_SAMPLE_RATE);
@@ -92,8 +99,15 @@ void sound_exit(void) {
 
 static void play(ndspWaveBuf *wb) {
     if (!s_soundInited) return;
-    // Re-queuing a buffer that's still playing is harmless (ndsp just
-    // restarts it) -- no need to track "is this one already playing".
+    // Re-adding a wavebuf that's still queued/playing (e.g. several
+    // ui_print_error() calls in quick succession -- a realistic case
+    // during backup_all_titles() if every upload fails almost instantly,
+    // network down) is not safe: the same struct would end up linked
+    // into ndsp's internal queue twice. Skip rather than force-restart --
+    // dropping a duplicate trigger of the exact same short tone is
+    // inaudible anyway, and avoids a queue of overlapping beeps piling up
+    // if failures come in faster than one tone's own duration.
+    if (wb->status != NDSP_WBUF_FREE && wb->status != NDSP_WBUF_DONE) return;
     ndspChnWaveBufAdd(SOUND_CHANNEL, wb);
 }
 

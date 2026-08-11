@@ -382,7 +382,13 @@ static void draw_icon_grid(void) {
     // osGetTime(), so it can't ever jump if a frame takes longer than
     // usual, just steps at whatever rate frames actually render.
     static u32 s_pulseFrame = 0;
-    s_pulseFrame++;
+    // Wrapped well short of where a growing float's precision would
+    // start eroding the 0.08f-per-frame phase step (imperceptible after
+    // hours of continuous uptime otherwise, but free to just avoid) --
+    // 100000 isn't an exact multiple of the ~78.5-frame period, so
+    // wrapping causes one negligible phase hiccup roughly every half
+    // hour rather than a real jump cut.
+    s_pulseFrame = (s_pulseFrame + 1) % 100000;
     float pulse = 0.5f + 0.5f * sinf((float)s_pulseFrame * 0.08f); // 0..1, ~1.3s period at 60fps
     float highlightPad = 4.0f + pulse * 2.0f;               // 4..6px frame around the tile
     u8 highlightAlpha = (u8)(170.0f + pulse * 85.0f);        // 170..255

@@ -261,7 +261,12 @@ static void refresh_account_email(DropboxTokens *tokens) {
 static const char *account_menu_label(int index, void *userdata) {
     const MenuState *state = (const MenuState *)userdata;
     if (index == 0) return ui_is_email_hidden() ? "Show email in header" : "Hide email in header";
-    if (index == 1) return "Search games...";
+    if (index == 1) {
+        if (!state->searchQuery[0]) return "Search games...";
+        static char labelBuf[96];
+        snprintf(labelBuf, sizeof(labelBuf), "Search games... (\"%s\")", state->searchQuery);
+        return labelBuf;
+    }
     if (state->searchQuery[0]) {
         if (index == 2) return "Clear search";
         if (index == 3) return "Log out";
@@ -339,8 +344,20 @@ static const char *game_detail_label(int index, void *userdata) {
 }
 
 static const char *dropbox_entry_label(int index, void *userdata) {
-    const DropboxBackupEntry *entries = (const DropboxBackupEntry *)userdata;
-    return entries[index].name;
+    const DropboxBackupEntry *e = &((const DropboxBackupEntry *)userdata)[index];
+    bool haveSize = e->size >= 0;
+    bool haveDate = e->modified[0] != '\0';
+    if (!haveSize && !haveDate) return e->name;
+
+    static char labelBuf[192];
+    if (haveSize && haveDate) {
+        snprintf(labelBuf, sizeof(labelBuf), "%s (%ld KB, %s)", e->name, e->size / 1024, e->modified);
+    } else if (haveDate) {
+        snprintf(labelBuf, sizeof(labelBuf), "%s (%s)", e->name, e->modified);
+    } else {
+        snprintf(labelBuf, sizeof(labelBuf), "%s (%ld KB)", e->name, e->size / 1024);
+    }
+    return labelBuf;
 }
 
 // Prints the game's header plus whatever's already uploaded to its Dropbox
