@@ -160,6 +160,7 @@ static struct {
     void *userdata;
     int selected;
     int topRow;
+    bool allowAll; // see ui_run_menu_with_all()
 } s_menu;
 
 static const char *s_confirmPrompt;
@@ -581,8 +582,15 @@ static void draw_menu(void) {
         y += LINE_HEIGHT;
     }
 
-    y = BOTTOM_H - MARGIN_Y - LINE_HEIGHT;
-    draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Up/Down select, A confirm, B cancel", false);
+    if (s_menu.allowAll) {
+        y = BOTTOM_H - MARGIN_Y - 2 * LINE_HEIGHT;
+        draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Up/Down select, A confirm", false);
+        y += LINE_HEIGHT;
+        draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Y: back up all, B: cancel", false);
+    } else {
+        y = BOTTOM_H - MARGIN_Y - LINE_HEIGHT;
+        draw_text(MARGIN_X, y, TEXT_SCALE, COLOR_MUTED, "Up/Down select, A confirm, B cancel", false);
+    }
 }
 
 static void draw_confirm(void) {
@@ -720,13 +728,14 @@ void ui_print_header_bottom(const char *title) {
     log_append_line(s_bottomLines, &s_bottomCount, "", COLOR_ACCENT, LOG_RULE, false);
 }
 
-int ui_run_menu(const char *title, int count, ui_menu_label_fn get_label, void *userdata) {
+static int run_menu(const char *title, int count, ui_menu_label_fn get_label, void *userdata, bool allowAll) {
     s_menu.title = title;
     s_menu.count = count;
     s_menu.getLabel = get_label;
     s_menu.userdata = userdata;
     s_menu.selected = 0;
     s_menu.topRow = 0;
+    s_menu.allowAll = allowAll;
     s_bottomMode = BOTTOM_MENU;
 
     const int visibleRows = 10;
@@ -745,6 +754,7 @@ int ui_run_menu(const char *title, int count, ui_menu_label_fn get_label, void *
             if (kDown & KEY_DOWN) { s_menu.selected = (s_menu.selected + 1) % count; decided = true; }
             else if (kDown & KEY_UP) { s_menu.selected = (s_menu.selected - 1 + count) % count; decided = true; }
             else if (kDown & KEY_A) { result = s_menu.selected; goto done; }
+            else if (allowAll && (kDown & KEY_Y)) { result = UI_MENU_ALL; goto done; }
             else if (kDown & KEY_B) { result = -1; goto done; }
             else gspWaitForVBlank();
         }
@@ -753,6 +763,14 @@ int ui_run_menu(const char *title, int count, ui_menu_label_fn get_label, void *
 done:
     s_bottomMode = BOTTOM_LOG;
     return result;
+}
+
+int ui_run_menu(const char *title, int count, ui_menu_label_fn get_label, void *userdata) {
+    return run_menu(title, count, get_label, userdata, false);
+}
+
+int ui_run_menu_with_all(const char *title, int count, ui_menu_label_fn get_label, void *userdata) {
+    return run_menu(title, count, get_label, userdata, true);
 }
 
 bool ui_confirm(const char *prompt) {

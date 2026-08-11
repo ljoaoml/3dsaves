@@ -6,6 +6,7 @@
 #include "sd_browse.h"
 #include "checkpoint_saves.h"
 #include "minizip_reader.h"
+#include "update_check.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -718,11 +719,74 @@ static void mark_backed_up_by_unique_id(MenuState *state, u32 uniqueId) {
     }
 }
 
+// Y inside show_checkpoint_folder_detail()'s picker: uploads every local
+// backup instance in the folder in one pass instead of one at a time,
+// same "keep going past a single failure, report a summary" shape as
+// backup_all_titles(). All of them go to the same per-instance Dropbox
+// paths a one-at-a-time upload would have used (dropbox_build_backup_path
+// keyed by each instance's own name), so this is safe to re-run later
+// without duplicating anything already uploaded.
+static void backup_all_instances_in_folder(MenuState *state, DropboxTokens *tokens,
+                                            const CheckpointTitleFolder *folder, const char *gameName,
+                                            const CheckpointBackup *instances, int count) {
+    char prompt[256];
+    snprintf(prompt, sizeof(prompt), "Back up all %d instances of %s?", count, gameName);
+    if (!ui_confirm(prompt)) return;
+
+    int okCount = 0, failCount = 0;
+    char failedNames[512] = {0};
+
+    for (int i = 0; i < count; i++) {
+        ui_clear();
+        ui_printf("Backup %d/%d: %s...\n", i + 1, count, instances[i].name);
+        ui_flush();
+
+        Result rc = saves_backup_folder(instances[i].fullPath, TMP_ZIP_PATH);
+        bool ok = R_SUCCEEDED(rc);
+        if (ok) {
+            char dropboxPath[192];
+            dropbox_build_backup_path(gameName, instances[i].name, dropboxPath, sizeof(dropboxPath));
+            ProgressState progress = { "Uploading to Dropbox", -1 };
+            char error[256];
+            ok = dropbox_upload_file(tokens, TMP_ZIP_PATH, dropboxPath,
+                                      report_progress, &progress, error, sizeof(error));
+            remove(TMP_ZIP_PATH);
+        }
+
+        if (ok) {
+            okCount++;
+        } else {
+            failCount++;
+            size_t used = strlen(failedNames);
+            if (used + strlen(instances[i].name) + 3 < sizeof(failedNames)) {
+                if (used > 0) strncat(failedNames, ", ", sizeof(failedNames) - used - 1);
+                strncat(failedNames, instances[i].name, sizeof(failedNames) - strlen(failedNames) - 1);
+            }
+        }
+    }
+
+    if (okCount > 0) mark_backed_up_by_unique_id(state, folder->uniqueId);
+
+    ui_clear();
+    if (failCount == 0) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "\nBacked up %d instances.\n", okCount);
+        ui_print_success(msg);
+    } else {
+        char msg[768];
+        snprintf(msg, sizeof(msg), "\nBacked up %d instances, %d failed:\n%s\n",
+                 okCount, failCount, failedNames);
+        ui_print_error(msg);
+    }
+    ui_wait_for_a();
+}
+
 // The picker for one Checkpoint title folder's own backup instances --
 // same upload flow as upload_local_backup()'s non-live (Checkpoint
 // folder) branch, just sourced from a folder found by browsing rather
 // than from an installed title's own scan, so there's no InstalledTitle
-// or live-save option here.
+// or live-save option here. Y backs up every instance shown here in one
+// pass (backup_all_instances_in_folder()) instead of picking one at a time.
 static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *tokens,
                                            const CheckpointTitleFolder *folder) {
     const char *gameName = display_name_for_folder(folder->fullPath);
@@ -741,7 +805,11 @@ static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *token
     for (;;) {
         print_dropbox_backups(tokens, gameName);
 
-        int choice = ui_run_menu(gameName, count, checkpoint_instance_menu_label, instances);
+        int choice = ui_run_menu_with_all(gameName, count, checkpoint_instance_menu_label, instances);
+        if (choice == UI_MENU_ALL) {
+            backup_all_instances_in_folder(state, tokens, folder, gameName, instances, count);
+            continue;
+        }
         if (choice < 0) return; // B: back to the folder list
 
         ui_clear();
@@ -984,6 +1052,28 @@ static void run_startup_diagnostics(void) {
     }
     ui_flush();
 
+    // PKSM-style update notice: best-effort, never blocks startup on a
+    // slow/failed GitHub request beyond this screen's own auto-continue
+    // timer below -- see update_check_run()'s doc comment for why a
+    // failed check isn't reported as "up to date".
+    {
+        bool hasUpdate = false;
+        char latestShort[8] = {0};
+        if (update_check_run(&hasUpdate, latestShort, sizeof(latestShort))) {
+            if (hasUpdate) {
+                char msg[96];
+                snprintf(msg, sizeof(msg), "update available: %s (you have %.7s) -- git pull + rebuild\n",
+                         latestShort, KONNECT3DS_GIT_HASH);
+                ui_print_success(msg);
+            } else {
+                ui_print("up to date.\n");
+            }
+        } else {
+            ui_print("update check: couldn't reach GitHub (offline?)\n");
+        }
+        ui_flush();
+    }
+
     // api.dropboxapi.com is the domain the app actually talks to (token
     // exchange/refresh) -- www.dropbox.com only ever opens in the phone's
     // browser via the QR code, this app never fetches it, and the OAuth
@@ -1041,6 +1131,19 @@ int main(void) {
             }
         }
         if (wantExit) break;
+
+        // auth_run_login_flow() leaves the bottom screen full of QR/login
+        // instructions (still the last thing flushed); refresh_account_email()
+        // (a network call) and refresh_titles() (an AM re-scan) both take
+        // real time and don't touch the screen themselves, so without this
+        // that stale bottom screen would just sit there looking stuck
+        // until the icon grid's first frame. Also covers the plain
+        // auth_load_tokens() startup path -- same stale-screen risk,
+        // cheaper to always clear here than to track which path ran.
+        ui_clear();
+        ui_clear_bottom();
+        ui_print("Loading your account and titles...\n");
+        ui_flush();
 
         refresh_account_email(&tokens);
         refresh_titles(&state);

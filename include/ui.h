@@ -40,6 +40,15 @@ void ui_flush_with_top(ui_top_draw_fn draw_top, void *userdata);
 typedef const char *(*ui_menu_label_fn)(int index, void *userdata);
 int ui_run_menu(const char *title, int count, ui_menu_label_fn get_label, void *userdata);
 
+// Same as ui_run_menu(), but Y is also recognized as a list-wide action
+// (returns UI_MENU_ALL instead of an index) -- for a caller offering "do
+// this for every item shown" as an alternative to picking one at a time
+// (e.g. show_checkpoint_folder_detail()'s "back up every local instance
+// in this folder"). Plain ui_run_menu() ignores Y entirely, so existing
+// callers are unaffected by this addition.
+#define UI_MENU_ALL (-2)
+int ui_run_menu_with_all(const char *title, int count, ui_menu_label_fn get_label, void *userdata);
+
 // Blocks until A or B is pressed. Returns true for A, false for B.
 bool ui_confirm(const char *prompt);
 
