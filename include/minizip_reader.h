@@ -20,8 +20,12 @@ typedef void (*ZipProgressFn)(uint32_t bytesDone, uint32_t bytesTotal, void *use
 // entries need -- entry names use '/' separators, same as
 // zipw_add_file() writes them). Succeeds (and creates an empty destDir)
 // for a zip with zero entries, same as saves_backup_title() succeeding
-// for an empty save. Returns false only if `zipPath` can't be opened or
-// its End-Of-Central-Directory record can't be found/parsed.
+// for an empty save. Returns false if `zipPath` can't be opened, its
+// End-Of-Central-Directory record can't be found/parsed, or any entry
+// name contains a ".." path segment or a leading '/' (rejected outright
+// rather than skipped, to fail closed on an archive that isn't the kind
+// this app ever writes itself -- see minizip_reader.c's
+// zip_entry_name_is_safe()).
 //
 // `onProgress`/`userdata` are optional (NULL/NULL for none).
 bool zipr_extract_all(const char *zipPath, const char *destDir,

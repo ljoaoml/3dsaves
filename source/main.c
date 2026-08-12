@@ -1125,51 +1125,20 @@ static void show_other_apps_picker(DropboxTokens *tokens) {
     free(titles);
 }
 
-// Temporary diagnostic: confirm on real hardware that the mbedTLS-over-
-// sockets rewrite of http.c (replacing the 3DS system httpc/TLS stack,
-// which cannot handshake with any modern server -- see
-// romfs/certs/README.md) actually completes a TLS connection, and shows
-// something on screen while it's blocked doing so instead of looking
-// frozen. Called against two different targets from main() below: see
-// the comment there for why. Remove once confirmed working.
-static void selftest_https(const char *label, const char *url) {
-    char msg[96];
-    snprintf(msg, sizeof(msg), "Testing connection to %s...\n", label);
-    ui_print(msg);
-    ui_flush();
-
-    HttpResponse testResp;
-    Result testRc = http_request(HTTPC_METHOD_GET, url, NULL, 0, NULL, 0, &testResp);
-    if (R_FAILED(testRc)) {
-        snprintf(msg, sizeof(msg), "[selftest] %s: FAIL rc=0x%08lX\n", label, (unsigned long)testRc);
-        ui_print_error(msg);
-        snprintf(msg, sizeof(msg), "  ip=%s tls=%s %s\n", http_get_last_resolved_ip(),
-                 http_get_last_tls_version(), http_get_last_tls_cipher());
-        ui_print(msg);
-        snprintf(msg, sizeof(msg), "  verify=%s\n", http_get_last_verify_info());
-        ui_print(msg);
-        snprintf(msg, sizeof(msg), "  verify flags: raw=0x%08lX after_mask=0x%08lX\n",
-                 (unsigned long)http_get_last_verify_flags_raw(),
-                 (unsigned long)http_get_last_verify_flags_after_mask());
-        ui_print(msg);
-        snprintf(msg, sizeof(msg), "  sent %d bytes, got %d bytes back\n",
-                 http_get_last_request_bytes_sent(), http_get_last_response_bytes_received());
-        ui_print(msg);
-    } else {
-        snprintf(msg, sizeof(msg), "[selftest] %s: OK HTTP %lu\n", label, (unsigned long)testResp.status_code);
-        ui_print_success(msg);
-        http_response_free(&testResp);
-    }
-}
-
 #ifndef KONNECT3DS_GIT_HASH
 #define KONNECT3DS_GIT_HASH "unknown"
 #endif
 
-// Runs the startup diagnostics (build hash, system time, HTTPS self-test)
+// Runs the startup diagnostics (build hash, system time, update check)
 // into the plain scrolling log -- only meaningful once, right after the
 // app actually starts talking to the network for the first time, not on
-// every logout/login cycle back to the login gate.
+// every logout/login cycle back to the login gate. Used to also run an
+// HTTPS self-test against api.dropboxapi.com and example.com (a control
+// target) to confirm on real hardware that the mbedTLS-over-sockets
+// rewrite of http.c could actually complete a TLS handshake -- removed
+// now that's long since confirmed; it was shipping an unexplained extra
+// network call to a third-party domain plus ~3s of startup delay on
+// every real user's launch, not just during that one investigation.
 static void run_startup_diagnostics(void) {
     ui_clear();
     ui_print_header("Konnect3DS - back up game saves to Dropbox");
@@ -1214,17 +1183,7 @@ static void run_startup_diagnostics(void) {
         ui_flush();
     }
 
-    // api.dropboxapi.com is the domain the app actually talks to (token
-    // exchange/refresh) -- www.dropbox.com only ever opens in the phone's
-    // browser via the QR code, this app never fetches it, and the OAuth
-    // relay (cloudflare-relay/) is never contacted by the 3DS at all
-    // (see include/auth.h). example.com is a control target: if it and
-    // api.dropboxapi.com behave differently, that points at something
-    // specific to one side rather than a general bug in this app's TLS
-    // client.
-    selftest_https("api.dropboxapi.com", "https://api.dropboxapi.com/");
-    selftest_https("example.com (control)", "https://example.com/");
-    ui_wait_briefly(180); // ~3s at 60fps, or skip immediately with A/B/START
+    ui_wait_briefly(90); // ~1.5s at 60fps, or skip immediately with A/B/START
 }
 
 int main(void) {

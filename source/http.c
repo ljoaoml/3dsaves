@@ -837,10 +837,50 @@ static long find_bad_header_byte(const HttpBuffer *req) {
 // approximation from http_request()'s parameters -- the reconstruction
 // couldn't show headers added internally (Host, User-Agent, ...), which
 // is exactly what's needed when a server claims a request is malformed.
-// No redaction: an Authorization header would appear here in the clear,
-// same as it already sits in plaintext in dropbox_token.txt on the same
-// SD card, so this doesn't add a new exposure -- just keep in mind this
-// file contains the same secrets before handing the SD card to anyone.
+// write_redacted() below masks the Authorization header and any OAuth
+// body field before it ever reaches this file: dropbox_token.txt is
+// encrypted at rest (see auth.c), and this log must not become a
+// plaintext copy of the same secrets sitting right next to it.
+// Writes `data` to `f` with the value of any Authorization header, and
+// any refresh_token=/code_verifier=/code= form field, replaced by
+// "***REDACTED***" -- the only places this app's OAuth secrets ever
+// appear on the wire (see auth.c's token exchange/refresh bodies and
+// dropbox.c's Authorization header). Only the first 8KB is scanned for
+// needles before falling back to a plain bulk write for the rest: every
+// header block and every secret-bearing body this app ever sends is well
+// under that (auth.c's bodies are under 1KB), while a multi-megabyte
+// save-zip upload body -- opaque binary, never a header or form field --
+// would otherwise mean redundantly memcmp'ing every byte of a large
+// upload on the ARM11's modest clock speed for no benefit.
+static void write_redacted(FILE *f, const uint8_t *data, size_t size) {
+    static const char *needles[] = {
+        "Authorization: ", "refresh_token=", "code_verifier=", "code="
+    };
+    size_t scanLen = size < 8192 ? size : 8192;
+    size_t i = 0;
+    while (i < scanLen) {
+        size_t matchLen = 0;
+        for (size_t n = 0; n < sizeof(needles) / sizeof(needles[0]); n++) {
+            size_t nlen = strlen(needles[n]);
+            if (i + nlen <= size && memcmp(data + i, needles[n], nlen) == 0) {
+                matchLen = nlen;
+                break;
+            }
+        }
+        if (matchLen) {
+            fwrite(data + i, 1, matchLen, f);
+            i += matchLen;
+            size_t valStart = i;
+            while (i < size && data[i] != '\r' && data[i] != '\n' && data[i] != '&' && data[i] != '"') i++;
+            if (i > valStart) fprintf(f, "***REDACTED***");
+            continue;
+        }
+        fputc(data[i], f);
+        i++;
+    }
+    if (size > scanLen) fwrite(data + scanLen, 1, size - scanLen, f);
+}
+
 static void write_debug_log(const char *url, Result rc, const HttpResponse *out) {
     // Only worth a write when something's actually wrong -- a plain
     // R_FAILED(rc) check alone would miss exactly the class of bug this
@@ -891,8 +931,8 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     fprintf(f, "\n");
 
     if (s_lastRawRequest.data) {
-        fprintf(f, "--- Request, exact wire bytes (%lu) ---\n", (unsigned long)s_lastRawRequest.size);
-        fwrite(s_lastRawRequest.data, 1, s_lastRawRequest.size, f);
+        fprintf(f, "--- Request, exact wire bytes (%lu), secrets redacted ---\n", (unsigned long)s_lastRawRequest.size);
+        write_redacted(f, s_lastRawRequest.data, s_lastRawRequest.size);
         fprintf(f, "\n");
     } else {
         fprintf(f, "--- Request was never built (failed before/during connect) ---\n");

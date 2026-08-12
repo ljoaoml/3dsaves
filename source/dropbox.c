@@ -48,6 +48,23 @@ void dropbox_build_backup_path(const char *name, const char *label, char *out, s
     snprintf(out, outSize, "/Konnect3DS/%s/%s.zip", safeName, safeLabel);
 }
 
+// Escapes '"' and '\' and drops raw control bytes so `in` can be safely
+// embedded inside a JSON string literal (used for the Dropbox-API-Arg
+// header, see dropbox_download_file() below). Unlike dropbox_sanitize_name()
+// above, this preserves the value instead of substituting it -- it still
+// has to round-trip to the exact path Dropbox expects to find, not just
+// be a human-readable name.
+static void json_escape_string(const char *in, char *out, size_t outSize) {
+    if (outSize == 0) return;
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 1 < outSize; p++) {
+        if (*p < 0x20) continue; // also unsafe in this app's own HTTP header-line framing
+        if ((*p == '"' || *p == '\\') && o + 2 < outSize) out[o++] = '\\';
+        out[o++] = (char)*p;
+    }
+    out[o] = '\0';
+}
+
 bool dropbox_upload_file(DropboxTokens *tokens, const char *localPath,
                           const char *dropboxPath, HttpProgressFn onProgress, void *progressUserdata,
                           char *errorOut, size_t errorOutSize) {
@@ -257,11 +274,18 @@ bool dropbox_download_file(DropboxTokens *tokens, const char *dropboxPath,
 
     // Same JSON-in-a-header convention as dropbox_upload_file()'s
     // Dropbox-API-Arg, just for /files/download's request instead of its
-    // response -- dropboxPath always comes from dropbox_build_game_folder()
-    // (already sanitized) joined with a name dropbox_list_backups() read
-    // straight back from Dropbox's own listing, so no extra escaping needed.
-    char apiArg[256];
-    snprintf(apiArg, sizeof(apiArg), "{\"path\":\"%s\"}", dropboxPath);
+    // response -- dropboxPath is dropbox_build_game_folder()'s output
+    // (sanitized) joined with a name dropbox_list_backups() read straight
+    // back from Dropbox's own listing, which is NOT sanitized (it has to
+    // stay byte-for-byte the real filename to fetch the right one) -- so
+    // unlike the upload path above, this does need its own escaping
+    // before going into a JSON string, in case that name ever contains a
+    // '"' or '\' (e.g. a file placed in this folder by something other
+    // than this app's own sanitized uploads).
+    char escapedPath[512];
+    json_escape_string(dropboxPath, escapedPath, sizeof(escapedPath));
+    char apiArg[560];
+    snprintf(apiArg, sizeof(apiArg), "{\"path\":\"%s\"}", escapedPath);
 
     HttpResponse resp;
     Result rc;

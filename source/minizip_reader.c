@@ -23,8 +23,15 @@ static uint16_t get_u16(const uint8_t *p) {
 // fixed mkdir("sdmc:/3ds", ...); mkdir("sdmc:/3ds/Konnect3DS", ...) calls,
 // just walking an arbitrary-depth path instead of two fixed ones.
 static void mkdir_p(const char *path) {
-    char buf[512];
-    snprintf(buf, sizeof(buf), "%s", path);
+    // Sized to match zipr_extract_all()'s destPath[768] -- this used to
+    // be a separate, smaller buf[512], which silently truncated (via the
+    // unchecked snprintf below) to a *different* path than the one
+    // actually passed to fopen() for anything over 511 chars, leaving
+    // the real parent directory never created and the write silently
+    // dropped.
+    char buf[768];
+    int n = snprintf(buf, sizeof(buf), "%s", path);
+    if (n < 0 || (size_t)n >= sizeof(buf)) return; // too long; nothing safe to do
     for (char *p = buf + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
@@ -33,6 +40,26 @@ static void mkdir_p(const char *path) {
         }
     }
     mkdir(buf, 0777);
+}
+
+// True if `name` (a zip central-directory entry name, read straight from
+// the archive) is safe to append directly onto a trusted destDir --
+// rejects a leading '/' and any ".." path segment. A zip's own directory
+// is free to name an entry anything at all; without this check a
+// crafted archive could walk destPath outside destDir entirely
+// ("zip-slip", CWE-22) via mkdir_p()/fopen() below. This app only ever
+// extracts archives it uploaded itself, but the whole point of checking
+// is to not depend on that staying true forever (an unofficial CIA, a
+// stale/replaced Dropbox file, a future caller of this same function).
+static bool zip_entry_name_is_safe(const char *name) {
+    if (name[0] == '\0' || name[0] == '/') return false;
+    for (const char *p = name; *p; p++) {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0') &&
+            (p == name || p[-1] == '/')) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Sums compSize across every STORE entry in the central directory starting
@@ -112,6 +139,7 @@ bool zipr_extract_all(const char *zipPath, const char *destDir,
         if (nameLen == 0 || nameLen >= sizeof(name)) { fclose(f); return false; }
         if (fread(name, 1, nameLen, f) != nameLen) { fclose(f); return false; }
         name[nameLen] = '\0';
+        if (!zip_entry_name_is_safe(name)) { fclose(f); return false; }
 
         // Skip this entry's extra field + comment to land on the next
         // central directory header.

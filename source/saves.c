@@ -528,6 +528,11 @@ static Result walk_and_zip(FS_Archive archive, const char *fsDir, const char *zi
         if (size > 0) FSFILE_Read(fileHandle, &bytesRead, 0, buf, size);
         FSFILE_Close(fileHandle);
 
+        if (bytesRead != size) {
+            if (buf) free(buf);
+            continue; // short read; skip rather than zip uninitialized heap memory as if it were real save data
+        }
+
         zipw_add_file(zw, childZipName, buf, size);
         if (buf) free(buf);
     }
