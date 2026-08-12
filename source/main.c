@@ -129,15 +129,32 @@ typedef struct {
     u32 *visible;
     u32 visibleCount;
     u32 visibleCapacity;
+    // A physical DS/DSi cartridge detected in the game card slot (see
+    // detect_ds_card_folder()), refreshed once per refresh_visible() call
+    // -- not on every drawn frame, since grid_label() reads this every
+    // frame the icon grid is up and re-probing hardware that often would
+    // be wasteful. dsCard is only meaningful when dsCardPresent is true.
+    bool dsCardPresent;
+    CheckpointTitleFolder dsCard;
 } MenuState;
 
 static const char *title_display_name(const InstalledTitle *t) {
     return t->name[0] ? t->name : (t->productCode[0] ? t->productCode : "Unknown");
 }
 
+// Mirrors ui.c's own internal grid_reserved_count() (see
+// ui_set_ds_card_visible()'s doc comment) -- ui.c only knows the bool it
+// was last told, this is the side that actually knows why: 4 always-there
+// tiles, +1 more when a cartridge is currently detected.
+static int grid_reserved_count(const MenuState *state) {
+    return state->dsCardPresent ? 5 : 4;
+}
+
 // ui_run_icon_grid()'s caption callback: index 0/1/2/3 are its four
-// reserved tiles, 4..N+3 line up with title_icon_pixels() below (same
-// state->visible indexing, offset by 4 instead of 1). The physical game
+// always-present reserved tiles, index 4 is the DS-cartridge tile when
+// state->dsCardPresent, and title indices (lining up with
+// title_icon_pixels() below, same state->visible indexing) start right
+// after whichever of those is the last one present. The physical game
 // card slot can only ever hold one title at a time and is easy to mix up
 // with an SD-installed game sharing a similar name, so it's flagged in
 // the caption -- display-only (a static scratch buffer, safe since only
@@ -155,8 +172,13 @@ static const char *grid_label(int index, void *userdata) {
         snprintf(labelBuf, sizeof(labelBuf), "Search: \"%s\"", state->searchQuery);
         return labelBuf;
     }
+    if (state->dsCardPresent && index == 4) {
+        static char labelBuf[300];
+        snprintf(labelBuf, sizeof(labelBuf), "%s (cartridge in slot)", state->dsCard.name);
+        return labelBuf;
+    }
 
-    const InstalledTitle *t = &state->titles[state->visible[index - 4]];
+    const InstalledTitle *t = &state->titles[state->visible[index - grid_reserved_count(state)]];
     const char *name = title_display_name(t);
     if (t->mediaType != MEDIATYPE_GAME_CARD) return name;
 
@@ -190,14 +212,23 @@ static bool contains_ci(const char *haystack, const char *needle) {
     return false;
 }
 
+static bool detect_ds_card_folder(CheckpointTitleFolder *out);
+
 // Rebuilds state->visible from state->titles/titleCount and the current
 // extdataFilterOn/searchQuery settings, then hands the result to
-// ui_set_home_icons(). Called after every refresh_titles() and whenever
-// SELECT toggles the extdata filter or the icon grid's search tile
-// changes the query -- titleCount is also visible's upper bound on how
-// large it'll ever need to be, so the backing array only grows, never
-// shrinks.
+// ui_set_home_icons(). Also re-probes the game card slot (dsCardPresent/
+// dsCard) and tells ui.c whether to show the grid's DS-cartridge tile --
+// bundled in here rather than its own call site so every place that
+// already calls this (directly, or via refresh_titles()) after returning
+// to the grid picks up a cartridge swapped in meanwhile for free. Called
+// after every refresh_titles() and whenever SELECT toggles the extdata
+// filter or the icon grid's search tile changes the query -- titleCount
+// is also visible's upper bound on how large it'll ever need to be, so
+// the backing array only grows, never shrinks.
 static void refresh_visible(MenuState *state) {
+    state->dsCardPresent = detect_ds_card_folder(&state->dsCard);
+    ui_set_ds_card_visible(state->dsCardPresent);
+
     if (state->visibleCapacity < state->titleCount) {
         u32 *grown = realloc(state->visible, sizeof(u32) * state->titleCount);
         if (!grown) return; // out of memory; keep showing the previous list
@@ -942,6 +973,23 @@ static void show_checkpoint_folder_detail(MenuState *state, DropboxTokens *token
     }
 }
 
+// Synthesizes the CheckpointTitleFolder for a physical DS/DSi cartridge
+// currently in the game card slot (saves_detect_ds_card()), named/pathed
+// exactly the way Checkpoint itself would. Shared by show_checkpoint_browser()
+// (which prepends/tags it in its own folder list) and refresh_visible()
+// (which drives the icon grid's own DS-cartridge tile), so both agree on
+// where that cartridge's backups live without duplicating this synthesis.
+// Returns false (leaving *out untouched) if no cartridge is inserted.
+static bool detect_ds_card_folder(CheckpointTitleFolder *out) {
+    char gameCode[8], description[64];
+    if (!saves_detect_ds_card(gameCode, sizeof(gameCode), description, sizeof(description))) return false;
+    snprintf(out->name, sizeof(out->name), "%s %s", gameCode, description);
+    snprintf(out->fullPath, sizeof(out->fullPath), "%s/%s %s", CHECKPOINT_SAVES_DIR, gameCode, description);
+    out->uniqueId = 0;
+    out->isInsertedCartridge = true;
+    return true;
+}
+
 // Tile 1 on the icon grid: browses every folder Checkpoint itself has
 // ever saved to CHECKPOINT_SAVES_DIR, not just the ones belonging to a
 // title this app's own automatic filtering currently lists -- an
@@ -964,29 +1012,20 @@ static void show_checkpoint_browser(MenuState *state, DropboxTokens *tokens) {
     int count = 0;
     checkpoint_list_title_folders(folders, MAX_CHECKPOINT_TITLE_FOLDERS, &count);
 
-    char cardGameCode[8], cardDescription[64];
-    if (saves_detect_ds_card(cardGameCode, sizeof(cardGameCode), cardDescription, sizeof(cardDescription))) {
-        char cardPath[512];
-        snprintf(cardPath, sizeof(cardPath), "%s/%s %s", CHECKPOINT_SAVES_DIR, cardGameCode, cardDescription);
-
+    CheckpointTitleFolder card;
+    if (detect_ds_card_folder(&card)) {
         // If this cart's already been backed up via Checkpoint before, the
         // scan above already found its folder -- tag that existing entry
         // instead of listing the same folder twice.
         bool alreadyListed = false;
         for (int i = 0; i < count; i++) {
-            if (strcmp(folders[i].fullPath, cardPath) == 0) {
+            if (strcmp(folders[i].fullPath, card.fullPath) == 0) {
                 folders[i].isInsertedCartridge = true;
                 alreadyListed = true;
                 break;
             }
         }
-        if (!alreadyListed) {
-            CheckpointTitleFolder *f = &folders[count++];
-            snprintf(f->name, sizeof(f->name), "%s %s", cardGameCode, cardDescription);
-            snprintf(f->fullPath, sizeof(f->fullPath), "%s", cardPath);
-            f->uniqueId = 0;
-            f->isInsertedCartridge = true;
-        }
+        if (!alreadyListed) folders[count++] = card;
     }
 
     if (count == 0) {
@@ -1324,11 +1363,22 @@ int main(void) {
                 continue;
             }
 
-            // choice is an index into state.visible (4..visibleCount+3),
-            // not state.titles directly -- state.visible[] is what maps
-            // back to a real title when the extdata filter (SELECT) has
-            // hidden some, offset by 4 for the four reserved tiles above.
-            int titleIndex = (int)state.visible[choice - 4];
+            if (state.dsCardPresent && choice == 4) {
+                // Same target screen the "Checkpoint" tile's own list
+                // reaches for this exact folder -- this is just a more
+                // direct way in, not a different flow. The actual read of
+                // the cart's save data still happens in Checkpoint, same
+                // as always (see detect_ds_card_folder()'s doc comment).
+                show_checkpoint_folder_detail(&state, &tokens, &state.dsCard);
+                refresh_visible(&state);
+                continue;
+            }
+
+            // choice is an index into state.visible, not state.titles
+            // directly -- state.visible[] is what maps back to a real
+            // title when the extdata filter (SELECT) has hidden some,
+            // offset by grid_reserved_count() for the reserved tiles above.
+            int titleIndex = (int)state.visible[choice - grid_reserved_count(&state)];
             show_game_detail(&state, &tokens, titleIndex);
             // Picks up newly-created Checkpoint backups and any title
             // list changes (cart swap, freshly installed game) each time

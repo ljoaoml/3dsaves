@@ -120,6 +120,14 @@ static int s_titleIconCount;
 static bool *s_titleBackedUp;
 static int s_titleBackedUpCount;
 
+// Whether the icon grid's 5th reserved tile (a physical DS/DSi cartridge
+// currently detected in the slot -- see ui_set_ds_card_visible()) is
+// shown this session. Unlike the always-present tiles 0-3, this one only
+// exists when main.c's own detection found a cartridge, so every place
+// that turns a raw tile index into a title index needs to know about it
+// -- see grid_reserved_count().
+static bool s_dsCardVisible;
+
 static u32 COLOR_BG;
 static u32 COLOR_TEXT;
 static u32 COLOR_MUTED;
@@ -184,12 +192,14 @@ static const char *s_confirmPrompt;
 
 // ui_run_icon_grid()'s navigation state. Tiles 0-3 are always the four
 // reserved tiles (import, Checkpoint, other apps, search -- see
-// draw_icon_grid()); tiles 4..titleCount+3 are whatever
-// ui_set_home_icons() last built. getLabel (optional) supplies the
-// caption shown under the grid for the highlighted tile -- index 0-3 for
-// the reserved tiles, same indices as get_pixels() (offset by 4) otherwise.
+// draw_icon_grid()), plus tile 4 when s_dsCardVisible (the detected
+// cartridge); title icons (whatever ui_set_home_icons() last built) start
+// right after that (see grid_reserved_count()). getLabel (optional)
+// supplies the caption shown under the grid for the highlighted tile --
+// the same reserved indices, same title indices as get_pixels()
+// (offset by grid_reserved_count()) otherwise.
 static struct {
-    int count; // 4 + title count
+    int count; // grid_reserved_count() + title count
     int cols;
     int selected;
     int scrollRow;      // target row, from the clamping logic in ui_run_icon_grid()
@@ -266,6 +276,10 @@ void ui_set_home_backup_marks(const bool *marks, int count) {
     if (!s_titleBackedUp) return;
     memcpy(s_titleBackedUp, marks, sizeof(bool) * (size_t)count);
     s_titleBackedUpCount = count;
+}
+
+void ui_set_ds_card_visible(bool visible) {
+    s_dsCardVisible = visible;
 }
 
 // Every piece of text in this file goes through here so "bold" means one
@@ -350,6 +364,15 @@ static void draw_top_header(void) {
         draw_text_aligned(TOP_W - MARGIN_X - 24.0f, 8.0f, TEXT_SCALE, COLOR_ACCENT, shown, true, C2D_AlignRight);
     }
     C2D_DrawRectSolid(MARGIN_X, HEADER_BAR_HEIGHT - 4.0f, 0.0f, TOP_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
+}
+
+// 0=import, 1=Checkpoint, 2=other apps, 3=search, always; +1 more (4=DS
+// cartridge) only when s_dsCardVisible -- everywhere a raw grid tile
+// index needs converting to/from a title index goes through this instead
+// of a literal 4, so the one place main.c toggles cartridge visibility
+// (ui_set_ds_card_visible()) is the only thing that has to stay in sync.
+static int grid_reserved_count(void) {
+    return s_dsCardVisible ? 5 : 4;
 }
 
 static int grid_cols(void) {
@@ -442,8 +465,10 @@ static void draw_search_tile(float x, float y, float size) {
 
 // The icon grid itself: tiles 0/1/2 are always the three reserved
 // folder-style tiles, tile 3 is the reserved search tile (see
-// draw_search_tile()), tiles 4..s_grid.count-1 are title icons (see
-// ui_set_home_icons()) -- this is the top screen's actual page content
+// draw_search_tile()), tile 4 is a reserved DS-cartridge tile when
+// s_dsCardVisible, title icons (see ui_set_home_icons()) start right
+// after whichever of those is the last one present (see
+// grid_reserved_count()) -- this is the top screen's actual page content
 // while ui_run_icon_grid() is active, occupying most of the screen below
 // draw_top_header(), not a decorative strip. The highlighted tile gets a
 // solid frame drawn behind it (in COLOR_SELECT_BG, currently the same
@@ -513,7 +538,22 @@ static void draw_icon_grid(void) {
             continue;
         }
 
-        int titleIdx = i - 4;
+        if (s_dsCardVisible && i == 4) {
+            // The detected cartridge, same folder icon as tiles 0-2 (it's
+            // "browse into this folder" too, just reached directly instead
+            // of via the Checkpoint tile's own list) -- getLabel()'s
+            // caption is what actually says "cartridge in slot".
+            if (s_folderIconLoaded) {
+                C2D_DrawImageAt(s_folderIcon, x, y, 0.0f, NULL,
+                                 ICON_TILE_SIZE / s_folderIcon.subtex->width,
+                                 ICON_TILE_SIZE / s_folderIcon.subtex->height);
+            } else {
+                C2D_DrawRectSolid(x, y, 0.0f, ICON_TILE_SIZE, ICON_TILE_SIZE, COLOR_MUTED);
+            }
+            continue;
+        }
+
+        int titleIdx = i - grid_reserved_count();
         if (titleIdx < s_titleIconCount && s_titleIconValid[titleIdx]) {
             C2D_Image img = { &s_titleIconTex[titleIdx], &s_titleIconSubtex };
             C2D_DrawImageAt(img, x, y, 0.0f, NULL, ICON_TILE_SIZE / 48.0f, ICON_TILE_SIZE / 48.0f);
@@ -960,7 +1000,7 @@ bool ui_confirm(const char *prompt) {
 }
 
 int ui_run_icon_grid(ui_menu_label_fn get_label, void *userdata) {
-    s_grid.count = 4 + s_titleIconCount; // tile 0 = import, tile 1 = Checkpoint, tile 2 = other apps, tile 3 = search
+    s_grid.count = grid_reserved_count() + s_titleIconCount;
     s_grid.cols = grid_cols();
     if (s_grid.selected >= s_grid.count) s_grid.selected = 0;
     s_grid.scrollRow = 0;
