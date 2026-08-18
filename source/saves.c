@@ -285,10 +285,10 @@ static Result backup_raw_gba_save(const InstalledTitle *title, const char *zipPa
 
     ZipWriter *zw = zipw_open(zipPath);
     if (!zw) { free(buf); return -1; }
-    zipw_add_file(zw, "00000001.sav", buf, hdr.saveSize);
+    bool wrote = zipw_add_file(zw, "00000001.sav", buf, hdr.saveSize);
     zipw_close(zw);
     free(buf);
-    return 0;
+    return wrote ? 0 : -1;
 }
 
 // Identifies a physical DS/DSi cartridge sitting in the game card slot --
@@ -505,7 +505,8 @@ static Result walk_and_zip(FS_Archive archive, const char *fsDir, const char *zi
         if (entry.attributes & FS_ATTRIBUTE_DIRECTORY) {
             char childZipPrefix[512];
             snprintf(childZipPrefix, sizeof(childZipPrefix), "%s/", childZipName);
-            walk_and_zip(archive, childFsPath, childZipPrefix, zw, depth + 1);
+            Result subRc = walk_and_zip(archive, childFsPath, childZipPrefix, zw, depth + 1);
+            if (R_FAILED(subRc)) { FSDIR_Close(dirHandle); return subRc; }
             continue;
         }
 
@@ -533,8 +534,17 @@ static Result walk_and_zip(FS_Archive archive, const char *fsDir, const char *zi
             continue; // short read; skip rather than zip uninitialized heap memory as if it were real save data
         }
 
-        zipw_add_file(zw, childZipName, buf, size);
+        bool wrote = zipw_add_file(zw, childZipName, buf, size);
         if (buf) free(buf);
+        if (!wrote) {
+            // A write failure here (most likely the SD card filling up) will
+            // fail identically for every file after this one too -- stop
+            // now instead of reading the rest of the save just to watch
+            // each write fail again, and report it rather than letting the
+            // caller upload a truncated zip as if the backup had succeeded.
+            FSDIR_Close(dirHandle);
+            return -1;
+        }
     }
 
     FSDIR_Close(dirHandle);
@@ -554,11 +564,11 @@ Result saves_backup_title(const InstalledTitle *title, const char *zipPath) {
         return -1;
     }
 
-    walk_and_zip(archive, "/", "", zw, 0);
+    Result walkRc = walk_and_zip(archive, "/", "", zw, 0);
 
     zipw_close(zw);
     FSUSER_CloseArchive(archive);
-    return 0;
+    return walkRc;
 }
 
 Result saves_backup_title_extdata(const InstalledTitle *title, const char *zipPath) {
@@ -572,11 +582,11 @@ Result saves_backup_title_extdata(const InstalledTitle *title, const char *zipPa
         return -1;
     }
 
-    walk_and_zip(archive, "/", "", zw, 0);
+    Result walkRc = walk_and_zip(archive, "/", "", zw, 0);
 
     zipw_close(zw);
     FSUSER_CloseArchive(archive);
-    return 0;
+    return walkRc;
 }
 
 // Recursively walks `diskDir` (a plain sdmc:/... path) adding every file
@@ -584,12 +594,12 @@ Result saves_backup_title_extdata(const InstalledTitle *title, const char *zipPa
 // Mirrors walk_and_zip() above but over stdio instead of an FS_Archive,
 // since a Checkpoint-style backup already sits on the SD card as loose
 // files, not inside a title's own save archive.
-static void walk_and_zip_folder(const char *diskDir, const char *zipPrefix,
-                                 ZipWriter *zw, int depth) {
-    if (depth > 32) return; // pathological loop guard
+static Result walk_and_zip_folder(const char *diskDir, const char *zipPrefix,
+                                   ZipWriter *zw, int depth) {
+    if (depth > 32) return 0; // pathological loop guard
 
     DIR *dir = opendir(diskDir);
-    if (!dir) return;
+    if (!dir) return 0;
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -606,7 +616,8 @@ static void walk_and_zip_folder(const char *diskDir, const char *zipPrefix,
         if (S_ISDIR(st.st_mode)) {
             char childZipPrefix[512];
             snprintf(childZipPrefix, sizeof(childZipPrefix), "%s/", childZipName);
-            walk_and_zip_folder(childDiskPath, childZipPrefix, zw, depth + 1);
+            Result subRc = walk_and_zip_folder(childDiskPath, childZipPrefix, zw, depth + 1);
+            if (R_FAILED(subRc)) { closedir(dir); return subRc; }
             continue;
         }
         if (!S_ISREG(st.st_mode)) continue;
@@ -628,11 +639,19 @@ static void walk_and_zip_folder(const char *diskDir, const char *zipPrefix,
             continue; // short read; skip rather than zip a truncated/garbage file
         }
 
-        zipw_add_file(zw, childZipName, buf, size);
+        bool wrote = zipw_add_file(zw, childZipName, buf, size);
         if (buf) free(buf);
+        if (!wrote) {
+            // Same reasoning as walk_and_zip()'s twin check: a write failure
+            // here (most likely the SD card filling up) will fail
+            // identically for every file after this one too.
+            closedir(dir);
+            return -1;
+        }
     }
 
     closedir(dir);
+    return 0;
 }
 
 Result saves_backup_folder(const char *sourceDir, const char *zipPath) {
@@ -643,8 +662,8 @@ Result saves_backup_folder(const char *sourceDir, const char *zipPath) {
     ZipWriter *zw = zipw_open(zipPath);
     if (!zw) return -1;
 
-    walk_and_zip_folder(sourceDir, "", zw, 0);
+    Result walkRc = walk_and_zip_folder(sourceDir, "", zw, 0);
 
     zipw_close(zw);
-    return 0;
+    return walkRc;
 }

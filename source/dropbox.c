@@ -341,12 +341,29 @@ bool dropbox_download_file(DropboxTokens *tokens, const char *dropboxPath,
         http_response_free(&resp);
         return false;
     }
-    size_t written = resp.body.size > 0 ? fwrite(resp.body.data, 1, resp.body.size, f) : 0;
+    // Writing the whole body in a single fwrite() (as this used to do) can
+    // come back short on real hardware for anything but small saves -- the
+    // 3DS FS service's single-transfer IPC buffer has a size limit, and a
+    // multi-megabyte save/extdata zip (photo-heavy Pokemon extdata, GBA VC
+    // saves, etc.) can exceed it, quietly truncating the write. Writing in
+    // bounded chunks (same size minizip_reader.c already streams zip
+    // extraction in, which doesn't hit this) keeps every individual
+    // fwrite() call comfortably under that limit.
+    const uint8_t *body = resp.body.data;
+    size_t remaining = resp.body.size;
+    size_t totalWritten = 0;
+    while (remaining > 0) {
+        size_t chunk = remaining < 4096 ? remaining : 4096;
+        size_t n = fwrite(body + totalWritten, 1, chunk, f);
+        totalWritten += n;
+        remaining -= n;
+        if (n != chunk) break; // real write error; further attempts won't succeed either
+    }
     fclose(f);
     http_response_free(&resp);
 
-    if (written != resp.body.size) {
-        if (errorOut) snprintf(errorOut, errorOutSize, "short write to SD card");
+    if (totalWritten != resp.body.size) {
+        if (errorOut) snprintf(errorOut, errorOutSize, "short write to SD card (check free space)");
         return false;
     }
     return true;
