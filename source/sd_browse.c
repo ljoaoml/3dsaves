@@ -49,6 +49,20 @@ static int compare_names(const void *a, const void *b) {
     return strcmp(*sa, *sb);
 }
 
+// Joins `dir` + '/' + `name` without producing a double slash when `dir`
+// already ends in one -- true only for SD_ROOT itself ("sdmc:/"), every
+// other currentDir value here has no trailing slash. An unnoticed doubled
+// slash (e.g. "sdmc://3ds") makes stat()/opendir() fail on real hardware,
+// which silently hid every entry at the SD root as if it were empty.
+static void join_path(char *out, size_t outSize, const char *dir, const char *name) {
+    size_t dirLen = strlen(dir);
+    if (dirLen > 0 && dir[dirLen - 1] == '/') {
+        snprintf(out, outSize, "%s%s", dir, name);
+    } else {
+        snprintf(out, outSize, "%s/%s", dir, name);
+    }
+}
+
 static bool list_subfolders(const char *dir, BrowseCtx *ctx) {
     free_listing(ctx);
 
@@ -61,7 +75,7 @@ static bool list_subfolders(const char *dir, BrowseCtx *ctx) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
 
         char full[600];
-        snprintf(full, sizeof(full), "%s/%s", dir, entry->d_name);
+        join_path(full, sizeof(full), dir, entry->d_name);
         struct stat st;
         if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
 
@@ -128,7 +142,7 @@ bool sd_browse_pick_folder(const char *startDir, char *outPath, size_t outSize) 
 
         const char *sub = ctx.names[choice - first_subfolder_index(&ctx)];
         char next[512];
-        snprintf(next, sizeof(next), "%s/%s", currentDir, sub);
+        join_path(next, sizeof(next), currentDir, sub);
         snprintf(currentDir, sizeof(currentDir), "%s", next);
     }
 
@@ -181,7 +195,7 @@ static bool list_dir_and_matching_files(const char *dir, const char *extension, 
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
 
         char full[600];
-        snprintf(full, sizeof(full), "%s/%s", dir, entry->d_name);
+        join_path(full, sizeof(full), dir, entry->d_name);
         struct stat st;
         if (stat(full, &st) != 0) continue;
 
@@ -240,13 +254,24 @@ bool sd_browse_pick_file(const char *startDir, const char *extension, char *outP
         ctx.hasParent = !is_sd_root(currentDir);
         if (!list_dir_and_matching_files(currentDir, extension, &ctx)) {
             // Can't open this directory -- back out rather than get stuck.
+            // Was silent until now, which looked exactly like the "nothing
+            // happens" symptom the double-slash bug above used to cause --
+            // say something so a genuine unreadable-folder case isn't
+            // mistaken for the picker doing nothing.
+            ui_clear();
+            ui_print_error("\nCouldn't open that folder.\n");
+            ui_wait_for_a();
             break;
         }
 
         int total = file_first_file_index(&ctx) + ctx.fileCount;
         if (total == 0) {
-            // Nothing to navigate into or pick from an empty root -- ui_run_menu
-            // requires at least one entry, so bail out as a cancel.
+            // Nothing to navigate into or pick from an empty folder --
+            // ui_run_menu requires at least one entry, so bail out as a
+            // cancel, but say so first (see the comment above).
+            ui_clear();
+            ui_print_error("\nNo subfolders or matching files here.\n");
+            ui_wait_for_a();
             break;
         }
         int choice = ui_run_menu(currentDir, total, file_browse_label, &ctx);
@@ -262,13 +287,13 @@ bool sd_browse_pick_file(const char *startDir, const char *extension, char *outP
         if (choice < firstFile) {
             const char *sub = ctx.dirNames[choice - file_first_dir_index(&ctx)];
             char next[512];
-            snprintf(next, sizeof(next), "%s/%s", currentDir, sub);
+            join_path(next, sizeof(next), currentDir, sub);
             snprintf(currentDir, sizeof(currentDir), "%s", next);
             continue;
         }
 
         const char *file = ctx.fileNames[choice - firstFile];
-        snprintf(outPath, outSize, "%s/%s", currentDir, file);
+        join_path(outPath, outSize, currentDir, file);
         result = true;
         break;
     }

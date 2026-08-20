@@ -738,16 +738,13 @@ static const char *display_name_for_folder(const char *folderPath) {
 static void mark_backed_up_by_unique_id(MenuState *state, u32 uniqueId);
 
 static void import_and_upload(MenuState *state, DropboxTokens *tokens) {
-    char startDir[64];
-    struct stat st;
-    if (stat(CHECKPOINT_SAVES_DIR, &st) == 0 && S_ISDIR(st.st_mode)) {
-        snprintf(startDir, sizeof(startDir), "%s", CHECKPOINT_SAVES_DIR);
-    } else {
-        snprintf(startDir, sizeof(startDir), "sdmc:/");
-    }
-
+    // Used to jump straight into CHECKPOINT_SAVES_DIR when that folder
+    // exists, but Checkpoint backups already have their own dedicated
+    // "Checkpoint" tile -- this one is for everything else on the SD card,
+    // so it always starts at the SD root and lets the user navigate
+    // anywhere from there, including to Checkpoint's own folder if wanted.
     char pickedPath[512];
-    if (!sd_browse_pick_folder(startDir, pickedPath, sizeof(pickedPath))) {
+    if (!sd_browse_pick_folder("sdmc:/", pickedPath, sizeof(pickedPath))) {
         return; // cancelled
     }
 
