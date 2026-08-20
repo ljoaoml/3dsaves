@@ -14,7 +14,10 @@ typedef struct ZipWriter ZipWriter;
 ZipWriter *zipw_open(const char *path);
 
 // Adds one file entry. `name` is the path stored inside the zip (use '/'
-// separators). `data`/`size` is the whole file content.
+// separators). `data`/`size` is the whole file content. Returns false on a
+// real write failure (SD card full, I/O error) -- the entry is not
+// recorded in the central directory in that case, so a caller that ignores
+// this would otherwise upload a silently-truncated zip.
 bool zipw_add_file(ZipWriter *zw, const char *name, const uint8_t *data, uint32_t size);
 
 // Writes the central directory + EOCD and closes the underlying file.

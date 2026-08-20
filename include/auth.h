@@ -33,6 +33,12 @@
 #define RELAY_BASE_URL "https://konnect3ds.vgchampions.org"
 #endif
 
+// Despite the ".txt" name (kept for continuity with older builds/FTP
+// muscle memory), this is no longer plain text -- auth_save_tokens()
+// encrypts it (AES-256-CTR, keyed to this specific console's own
+// hardware device ID) before writing, so a copied SD card's worth of
+// files doesn't hand over a working Dropbox login on any other device.
+// See derive_token_key()/aes_ctr_transform() in auth.c.
 #define DROPBOX_TOKEN_FILE "sdmc:/3ds/Konnect3DS/dropbox_token.txt"
 
 typedef struct {
@@ -48,10 +54,15 @@ typedef struct {
     bool valid;
 } DropboxTokens;
 
-// Loads previously saved tokens from SD, if any. Returns false if none exist.
+// Loads previously saved tokens from SD, if any. Returns false if none
+// exist, if they were encrypted for a different console (see
+// DROPBOX_TOKEN_FILE's comment), or if the file predates encryption
+// support -- all three look identical from here (decrypts to garbage
+// that fails validation), and all three mean the same thing to the
+// caller: no usable saved login, go through auth_run_login_flow() again.
 bool auth_load_tokens(DropboxTokens *tokens);
 
-// Persists tokens to SD (overwrites any existing file).
+// Persists tokens to SD, encrypted (overwrites any existing file).
 bool auth_save_tokens(const DropboxTokens *tokens);
 
 void auth_delete_tokens(void);
@@ -59,8 +70,13 @@ void auth_delete_tokens(void);
 // Runs the full interactive login: prints the authorize URL to the console,
 // opens the software keyboard for the user to paste the resulting code, and
 // exchanges it for tokens. Blocks until done or cancelled.
-// Returns true on success and fills `out`.
-bool auth_run_login_flow(DropboxTokens *out);
+// Returns true on success and fills `out`. If the user pressed START to
+// exit the app outright (rather than B, which just cancels back to the
+// login gate to try again), *wantExit is set true -- checked regardless
+// of the return value, since exiting is its own outcome, not a login
+// failure. *wantExit is only ever set to true, never reset to false, so
+// callers should initialize it themselves.
+bool auth_run_login_flow(DropboxTokens *out, bool *wantExit);
 
 // Refreshes the access token using the stored refresh token if it looks
 // expired (or unconditionally if force_refresh is true -- worth passing

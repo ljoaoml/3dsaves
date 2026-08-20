@@ -1,0 +1,17 @@
+{
+    "name": "Konnect3DS (devkitARM)",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "remoteEnv": {
+        "PATH": "${containerEnv:DEVKITARM}/bin:${containerEnv:PATH}"
+    },
+    "postCreateCommand": "echo Ready. && $DEVKITARM/bin/arm-none-eabi-gcc --version | head -1 && echo DEVKITPRO=$DEVKITPRO && echo DEVKITARM=$DEVKITARM && echo 'Run: make   (or: make cia)'",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools"
+            ]
+        }
+    }
+}

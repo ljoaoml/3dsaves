@@ -10,3 +10,10 @@
 // full sdmc:/... path (no trailing slash) into `outPath`. B at any point
 // cancels the whole picker and returns false.
 bool sd_browse_pick_folder(const char *startDir, char *outPath, size_t outSize);
+
+// Same navigation model, but for picking a single file: folders are pure
+// navigation stops (no "select this folder" option), and only files whose
+// name ends in `extension` (case-insensitive, include the dot, e.g. ".gba")
+// are listed and selectable. Picking one writes its full sdmc:/... path into
+// `outPath`. B at any point cancels and returns false.
+bool sd_browse_pick_file(const char *startDir, const char *extension, char *outPath, size_t outSize);

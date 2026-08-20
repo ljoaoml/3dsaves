@@ -55,6 +55,26 @@ static void put_u32(FILE *f, uint32_t v) {
     fwrite(b, 1, 4, f);
 }
 
+// Writing a whole save file's bytes in a single fwrite() call (as this used
+// to do) can come back short on real hardware for anything but small saves
+// -- the 3DS FS service's single-transfer IPC buffer has a size limit a
+// multi-megabyte save/extdata file can exceed, quietly truncating the
+// write (same failure mode dropbox.c's download path hit and was fixed
+// for). Writing in bounded chunks keeps every individual fwrite() call
+// comfortably under that limit.
+static bool write_all(FILE *f, const void *data, size_t size) {
+    const uint8_t *p = (const uint8_t *)data;
+    size_t remaining = size;
+    while (remaining > 0) {
+        size_t chunk = remaining < 4096 ? remaining : 4096;
+        size_t n = fwrite(p, 1, chunk, f);
+        p += n;
+        remaining -= n;
+        if (n != chunk) return false; // real write error; further attempts won't succeed either
+    }
+    return true;
+}
+
 ZipWriter *zipw_open(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return NULL;
@@ -88,8 +108,9 @@ bool zipw_add_file(ZipWriter *zw, const char *name, const uint8_t *data, uint32_
     put_u32(zw->f, size);         // uncompressed size
     put_u16(zw->f, nameLen);
     put_u16(zw->f, 0);            // extra field length
-    fwrite(name, 1, nameLen, zw->f);
-    if (size > 0) fwrite(data, 1, size, zw->f);
+    bool ok = write_all(zw->f, name, nameLen);
+    if (ok && size > 0) ok = write_all(zw->f, data, size);
+    if (!ok) return false; // truncated entry -- don't record it in the central directory below
 
     zw->offset = localOffset + 30 + nameLen + size;
 

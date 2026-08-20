@@ -478,8 +478,13 @@ static void tls_close(TlsConn *c) {
 
 // sentOut (optional) gets how many bytes actually went out even on
 // failure, so a caller can tell "nothing was ever sent" from "most of
-// the request went out, then it stalled/failed".
-static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, size_t *sentOut) {
+// the request went out, then it stalled/failed". onProgress (optional,
+// see HttpProgressFn) is called after every successful partial write with
+// cumulative bytes sent -- mbedtls_ssl_write() has no minimum chunk size
+// it's guaranteed to accept, so this can genuinely fire many times over
+// one request.
+static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, size_t *sentOut,
+                          HttpProgressFn onProgress, void *progressUserdata) {
     size_t off = 0;
     u64 start = osGetTime();
     while (off < len) {
@@ -497,6 +502,7 @@ static int tls_write_all(mbedtls_ssl_context *ssl, const u8 *data, size_t len, s
         }
         off += (size_t)ret;
         start = osGetTime(); // reset the deadline on forward progress
+        if (onProgress) onProgress((u32)off, (u32)len, progressUserdata);
     }
     if (sentOut) *sentOut = off;
     return 0;
@@ -605,6 +611,7 @@ static bool header_line_value(const char *line, const char *name, char *out, siz
 static Result do_single_request(HTTPC_RequestMethod method, const char *url,
                                  const HttpHeader *headers, int header_count,
                                  const u8 *body, u32 body_size,
+                                 HttpProgressFn onProgress, void *progressUserdata,
                                  char *redirect_out, size_t redirect_out_size,
                                  HttpResponse *out) {
     s_lastRequestBytesSent = -1;
@@ -690,7 +697,7 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     if (s_lastRawRequest.data) memcpy(s_lastRawRequest.data, req.data, req.size);
 
     size_t sent = 0;
-    int wret = tls_write_all(&conn.ssl, req.data, req.size, &sent);
+    int wret = tls_write_all(&conn.ssl, req.data, req.size, &sent, onProgress, progressUserdata);
     s_lastRequestBytesSent = (int)sent;
     free(req.data);
     if (wret != 0) {
@@ -800,28 +807,6 @@ static Result do_single_request(HTTPC_RequestMethod method, const char *url,
     return 0;
 }
 
-// One numbered log file per app launch (http_debug_1.log, _2.log, ...),
-// tracked via a small counter file so a fresh test run always gets a new
-// file without having to manually delete the old one first. Overwritten
-// on every request *within* that file, not appended -- the login screen
-// polls the relay every ~2s while waiting, so a new file (or appending)
-// per request would flood the SD card with dozens of near-identical
-// files during a single wait. Only the most recent request in the
-// current run is available this way, but that's normally exactly the
-// one that just failed.
-static int next_log_number(void) {
-    int n = 0;
-    FILE *f = fopen("sdmc:/3ds/Konnect3DS/http_debug_seq.txt", "rb");
-    if (f) {
-        if (fscanf(f, "%d", &n) != 1) n = 0;
-        fclose(f);
-    }
-    n++;
-    f = fopen("sdmc:/3ds/Konnect3DS/http_debug_seq.txt", "wb");
-    if (f) { fprintf(f, "%d", n); fclose(f); }
-    return n;
-}
-
 // A stray control byte (NUL, or anything else below 0x20 other than the
 // \r\n line endings themselves) inside the header block turns an
 // otherwise well-formed-looking request into something a strict server
@@ -852,16 +837,65 @@ static long find_bad_header_byte(const HttpBuffer *req) {
 // approximation from http_request()'s parameters -- the reconstruction
 // couldn't show headers added internally (Host, User-Agent, ...), which
 // is exactly what's needed when a server claims a request is malformed.
-// No redaction: an Authorization header would appear here in the clear,
-// same as it already sits in plaintext in dropbox_token.txt on the same
-// SD card, so this doesn't add a new exposure -- just keep in mind this
-// file contains the same secrets before handing the SD card to anyone.
-static void write_debug_log(const char *url, Result rc, const HttpResponse *out) {
-    static int s_logNumber = -1;
-    if (s_logNumber < 0) s_logNumber = next_log_number();
+// write_redacted() below masks the Authorization header and any OAuth
+// body field before it ever reaches this file: dropbox_token.txt is
+// encrypted at rest (see auth.c), and this log must not become a
+// plaintext copy of the same secrets sitting right next to it.
+// Writes `data` to `f` with the value of any Authorization header, and
+// any refresh_token=/code_verifier=/code= form field, replaced by
+// "***REDACTED***" -- the only places this app's OAuth secrets ever
+// appear on the wire (see auth.c's token exchange/refresh bodies and
+// dropbox.c's Authorization header). Only the first 8KB is scanned for
+// needles before falling back to a plain bulk write for the rest: every
+// header block and every secret-bearing body this app ever sends is well
+// under that (auth.c's bodies are under 1KB), while a multi-megabyte
+// save-zip upload body -- opaque binary, never a header or form field --
+// would otherwise mean redundantly memcmp'ing every byte of a large
+// upload on the ARM11's modest clock speed for no benefit.
+static void write_redacted(FILE *f, const uint8_t *data, size_t size) {
+    static const char *needles[] = {
+        "Authorization: ", "refresh_token=", "code_verifier=", "code="
+    };
+    size_t scanLen = size < 8192 ? size : 8192;
+    size_t i = 0;
+    while (i < scanLen) {
+        size_t matchLen = 0;
+        for (size_t n = 0; n < sizeof(needles) / sizeof(needles[0]); n++) {
+            size_t nlen = strlen(needles[n]);
+            if (i + nlen <= size && memcmp(data + i, needles[n], nlen) == 0) {
+                matchLen = nlen;
+                break;
+            }
+        }
+        if (matchLen) {
+            fwrite(data + i, 1, matchLen, f);
+            i += matchLen;
+            size_t valStart = i;
+            while (i < size && data[i] != '\r' && data[i] != '\n' && data[i] != '&' && data[i] != '"') i++;
+            if (i > valStart) fprintf(f, "***REDACTED***");
+            continue;
+        }
+        fputc(data[i], f);
+        i++;
+    }
+    if (size > scanLen) fwrite(data + scanLen, 1, size - scanLen, f);
+}
 
-    char path[64];
-    snprintf(path, sizeof(path), "sdmc:/3ds/Konnect3DS/http_debug_%d.log", s_logNumber);
+static void write_debug_log(const char *url, Result rc, const HttpResponse *out) {
+    // Only worth a write when something's actually wrong -- a plain
+    // R_FAILED(rc) check alone would miss exactly the class of bug this
+    // log was built to catch (a *successful* request that got back an
+    // unwanted status -- e.g. Cloudflare's raw 400s, see the git history),
+    // so any non-2xx status counts as "wrong" too, not just a transport
+    // failure. One fixed filename (not a new numbered file per launch --
+    // that accumulated forever and was never cleaned up) that only gets
+    // (re)written on an actual problem: if it's not there, nothing's wrong;
+    // if it is, it's always about the most recent problem, not stale.
+    bool failed = R_FAILED(rc);
+    bool badStatus = out && (out->status_code < 200 || out->status_code >= 300);
+    if (!failed && !badStatus) return;
+
+    const char *path = "sdmc:/3ds/Konnect3DS/http_debug.log";
     FILE *f = fopen(path, "wb");
     if (!f) return;
 
@@ -897,8 +931,8 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     fprintf(f, "\n");
 
     if (s_lastRawRequest.data) {
-        fprintf(f, "--- Request, exact wire bytes (%lu) ---\n", (unsigned long)s_lastRawRequest.size);
-        fwrite(s_lastRawRequest.data, 1, s_lastRawRequest.size, f);
+        fprintf(f, "--- Request, exact wire bytes (%lu), secrets redacted ---\n", (unsigned long)s_lastRawRequest.size);
+        write_redacted(f, s_lastRawRequest.data, s_lastRawRequest.size);
         fprintf(f, "\n");
     } else {
         fprintf(f, "--- Request was never built (failed before/during connect) ---\n");
@@ -920,10 +954,16 @@ static void write_debug_log(const char *url, Result rc, const HttpResponse *out)
     fclose(f);
 }
 
-Result http_request(HTTPC_RequestMethod method, const char *url,
-                     const HttpHeader *headers, int header_count,
-                     const u8 *body, u32 body_size,
-                     HttpResponse *out) {
+// Shared by the public http_request() (always NULL/NULL here) and
+// http_request_file_body() (may pass a real progress callback) -- the
+// only difference between them is whether do_single_request()'s writes
+// report progress, so the redirect-following loop itself only needs to
+// exist once.
+static Result http_request_ex(HTTPC_RequestMethod method, const char *url,
+                               const HttpHeader *headers, int header_count,
+                               const u8 *body, u32 body_size,
+                               HttpProgressFn onProgress, void *progressUserdata,
+                               HttpResponse *out) {
     if (!s_httpInited) return HTTP_ERR_BAD_URL;
     memset(out, 0, sizeof(*out));
 
@@ -934,6 +974,7 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
         char location[1024] = {0};
         Result rc = do_single_request(method, currentUrl, headers, header_count,
                                        body, body_size,
+                                       onProgress, progressUserdata,
                                        location, sizeof(location), out);
         if (rc == HTTP_REDIRECT_SENTINEL) {
             snprintf(currentUrl, sizeof(currentUrl), "%s", location);
@@ -946,9 +987,17 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
     return HTTP_ERR_TOO_MANY_REDIRECTS;
 }
 
+Result http_request(HTTPC_RequestMethod method, const char *url,
+                     const HttpHeader *headers, int header_count,
+                     const u8 *body, u32 body_size,
+                     HttpResponse *out) {
+    return http_request_ex(method, url, headers, header_count, body, body_size, NULL, NULL, out);
+}
+
 Result http_request_file_body(HTTPC_RequestMethod method, const char *url,
                                const HttpHeader *headers, int header_count,
                                FILE *body_file, u32 body_size,
+                               HttpProgressFn onProgress, void *progressUserdata,
                                HttpResponse *out) {
     if (!s_httpInited) return HTTP_ERR_BAD_URL;
     memset(out, 0, sizeof(*out));
@@ -961,7 +1010,8 @@ Result http_request_file_body(HTTPC_RequestMethod method, const char *url,
         return HTTP_ERR_BAD_RESPONSE;
     }
 
-    Result rc = http_request(method, url, headers, header_count, buf, body_size, out);
+    Result rc = http_request_ex(method, url, headers, header_count, buf, body_size,
+                                 onProgress, progressUserdata, out);
     free(buf);
     return rc;
 }

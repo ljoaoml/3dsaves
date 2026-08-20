@@ -20,6 +20,15 @@ typedef struct {
     HttpBuffer body;
 } HttpResponse;
 
+// Optional progress callback for http_request_file_body() (see below):
+// called after each chunk written to the wire with cumulative bytes sent
+// so far and the total (request headers + body combined -- headers are a
+// few hundred bytes at most, negligible against any real upload, so this
+// is effectively "how much of the file has gone out" without needing to
+// track the two separately). May be called many times a second; keep it
+// cheap.
+typedef void (*HttpProgressFn)(u32 bytesDone, u32 bytesTotal, void *userdata);
+
 // Loads the bundled root CA certs from romfs. Call once after romfsInit().
 Result http_init(void);
 void http_exit(void);
@@ -48,13 +57,13 @@ int http_get_last_response_bytes_received(void);
 // Which IP the most recent request's hostname resolved to, and what TLS
 // version/cipher suite got negotiated (or "?" if not gotten that far).
 // Lets a real-hardware result be compared directly against e.g.
-// `openssl s_client` run from a PC on the same network. Every request
-// also writes sdmc:/3ds/Konnect3DS/http_debug_<N>.log (a fresh <N> each
-// app launch, so a new test run never needs the old file deleted first;
-// overwritten in place for every request within that same run) with this
-// plus the exact request/response bytes -- check the highest-numbered
-// one after anything that fails in a way that's hard to diagnose from
-// just the Result code and these getters.
+// `openssl s_client` run from a PC on the same network. A request that
+// fails outright, or comes back with a non-2xx status, also (over)writes
+// sdmc:/3ds/Konnect3DS/http_debug.log with this plus the exact
+// request/response bytes -- a successful request doesn't touch it at all,
+// so its mere presence already means something went wrong; check it after
+// anything that fails in a way that's hard to diagnose from just the
+// Result code and these getters.
 const char *http_get_last_resolved_ip(void);
 const char *http_get_last_tls_version(void);
 const char *http_get_last_tls_cipher(void);
@@ -85,9 +94,13 @@ Result http_request(HTTPC_RequestMethod method, const char *url,
 // sizes, but a real streaming upload would need chunked/multi-part support
 // that httpc does not expose cleanly. Keep an eye on this for very large
 // (tens of MB) extdata saves.
+//
+// `onProgress`/`progressUserdata` are optional (NULL/NULL for none) -- see
+// HttpProgressFn above.
 Result http_request_file_body(HTTPC_RequestMethod method, const char *url,
                                const HttpHeader *headers, int header_count,
                                FILE *body_file, u32 body_size,
+                               HttpProgressFn onProgress, void *progressUserdata,
                                HttpResponse *out);
 
 void http_response_free(HttpResponse *resp);
