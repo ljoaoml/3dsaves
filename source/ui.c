@@ -190,9 +190,9 @@ static struct {
 
 static const char *s_confirmPrompt;
 
-// ui_run_icon_grid()'s navigation state. Tiles 0-3 are always the four
-// reserved tiles (import, Checkpoint, other apps, search -- see
-// draw_icon_grid()), plus tile 4 when s_dsCardVisible (the detected
+// ui_run_icon_grid()'s navigation state. Tiles 0-4 are always the five
+// reserved tiles (import, Checkpoint, other apps, search, GBA cheats --
+// see draw_icon_grid()), plus tile 5 when s_dsCardVisible (the detected
 // cartridge); title icons (whatever ui_set_home_icons() last built) start
 // right after that (see grid_reserved_count()). getLabel (optional)
 // supplies the caption shown under the grid for the highlighted tile --
@@ -366,13 +366,14 @@ static void draw_top_header(void) {
     C2D_DrawRectSolid(MARGIN_X, HEADER_BAR_HEIGHT - 4.0f, 0.0f, TOP_W - 2 * MARGIN_X, 1.5f, COLOR_ACCENT);
 }
 
-// 0=import, 1=Checkpoint, 2=other apps, 3=search, always; +1 more (4=DS
-// cartridge) only when s_dsCardVisible -- everywhere a raw grid tile
-// index needs converting to/from a title index goes through this instead
-// of a literal 4, so the one place main.c toggles cartridge visibility
-// (ui_set_ds_card_visible()) is the only thing that has to stay in sync.
+// 0=import, 1=Checkpoint, 2=other apps, 3=search, 4=GBA cheats, always;
+// +1 more (5=DS cartridge) only when s_dsCardVisible -- everywhere a raw
+// grid tile index needs converting to/from a title index goes through
+// this instead of a literal 5, so the one place main.c toggles cartridge
+// visibility (ui_set_ds_card_visible()) is the only thing that has to
+// stay in sync.
 static int grid_reserved_count(void) {
-    return s_dsCardVisible ? 5 : 4;
+    return s_dsCardVisible ? 6 : 5;
 }
 
 static int grid_cols(void) {
@@ -463,9 +464,48 @@ static void draw_search_tile(float x, float y, float size) {
                       ex - perpX * half, ey - perpY * half, glyph, 0.0f);
 }
 
+// Same thick-line-from-two-triangles technique as draw_search_tile()'s
+// handle, generalized to an arbitrary segment -- used by
+// draw_gba_cheats_tile() to build a multi-segment glyph without repeating
+// the perpendicular-offset math for each piece.
+static void draw_thick_segment(float x1, float y1, float x2, float y2, float half, u32 color) {
+    float dx = x2 - x1, dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.0001f) return;
+    float dirX = dx / len, dirY = dy / len;
+    float perpX = -dirY, perpY = dirX;
+    C2D_DrawTriangle(x1 - perpX * half, y1 - perpY * half, color,
+                      x1 + perpX * half, y1 + perpY * half, color,
+                      x2 + perpX * half, y2 + perpY * half, color, 0.0f);
+    C2D_DrawTriangle(x1 - perpX * half, y1 - perpY * half, color,
+                      x2 + perpX * half, y2 + perpY * half, color,
+                      x2 - perpX * half, y2 - perpY * half, color, 0.0f);
+}
+
+// The icon grid's 5th reserved tile (GBA cheats) -- same pale-lavender
+// backdrop as draw_search_tile(), with a simple 3-segment lightning-bolt
+// zigzag standing in for "cheats/codes" since there's no bundled asset for
+// this either.
+static void draw_gba_cheats_tile(float x, float y, float size) {
+    u32 bg = C2D_Color32(0xE4, 0xE2, 0xF6, 0xFF);
+    u32 glyph = C2D_Color32(0x58, 0x54, 0xC1, 0xFF);
+
+    draw_rounded_rect(x, y, size, size, 10.0f, bg);
+
+    float half = size * 0.05f;
+    float x1 = x + size * 0.60f, y1 = y + size * 0.16f;
+    float x2 = x + size * 0.36f, y2 = y + size * 0.52f;
+    float x3 = x + size * 0.62f, y3 = y + size * 0.50f;
+    float x4 = x + size * 0.40f, y4 = y + size * 0.86f;
+    draw_thick_segment(x1, y1, x2, y2, half, glyph);
+    draw_thick_segment(x2, y2, x3, y3, half, glyph);
+    draw_thick_segment(x3, y3, x4, y4, half, glyph);
+}
+
 // The icon grid itself: tiles 0/1/2 are always the three reserved
 // folder-style tiles, tile 3 is the reserved search tile (see
-// draw_search_tile()), tile 4 is a reserved DS-cartridge tile when
+// draw_search_tile()), tile 4 is the reserved GBA-cheats tile (see
+// draw_gba_cheats_tile()), tile 5 is a reserved DS-cartridge tile when
 // s_dsCardVisible, title icons (see ui_set_home_icons()) start right
 // after whichever of those is the last one present (see
 // grid_reserved_count()) -- this is the top screen's actual page content
@@ -538,7 +578,15 @@ static void draw_icon_grid(void) {
             continue;
         }
 
-        if (s_dsCardVisible && i == 4) {
+        if (i == 4) {
+            // GBA cheats, drawn with its own lightning-bolt glyph (see
+            // draw_gba_cheats_tile()) rather than the folder icon -- an
+            // action tile like search, not a folder to browse into.
+            draw_gba_cheats_tile(x, y, ICON_TILE_SIZE);
+            continue;
+        }
+
+        if (s_dsCardVisible && i == 5) {
             // The detected cartridge, same folder icon as tiles 0-2 (it's
             // "browse into this folder" too, just reached directly instead
             // of via the Checkpoint tile's own list) -- getLabel()'s

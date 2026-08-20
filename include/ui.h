@@ -137,13 +137,15 @@ bool ui_is_email_hidden(void);
 // installed app, unfiltered" (all three drawn from the same loaded
 // folder icon texture, told apart only by their caption); tile 3 is a
 // fourth reserved tile, "search games by name" (drawn with its own
-// magnifying-glass glyph instead); tile 4 is a fifth reserved tile, a
-// detected DS/DSi cartridge, but only when ui_set_ds_card_visible(true)
-// was last called -- when it wasn't, there's no tile 4 at all and title
-// icons start there instead. Tiles 4..N+3 (or 5..N+4 with the cartridge
-// tile) are whatever ui_set_home_icons() last built, in the same order.
+// magnifying-glass glyph instead); tile 4 is a fifth reserved tile,
+// "manage GBA cheats" (drawn with its own lightning-bolt glyph); tile 5
+// is a sixth reserved tile, a detected DS/DSi cartridge, but only when
+// ui_set_ds_card_visible(true) was last called -- when it wasn't, there's
+// no tile 5 at all and title icons start there instead. Tiles 5..N+4 (or
+// 6..N+5 with the cartridge tile) are whatever ui_set_home_icons() last
+// built, in the same order.
 // get_label(i, userdata) (optional; same contract as ui_run_menu()'s, but
-// index 0/1/2/3(/4) mean the reserved tiles) supplies the caption shown
+// index 0/1/2/3/4(/5) mean the reserved tiles) supplies the caption shown
 // under the grid for whichever tile is currently highlighted. The bottom
 // screen shows a fixed set of control hints (footer-anchored) for the
 // whole time this runs -- there's nothing else for it to show here.
@@ -152,9 +154,9 @@ bool ui_is_email_hidden(void);
 // move a full row, and L/R move a full page (visible rows' worth) --
 // both clamp at the top/bottom instead of wrapping (see ui.c for why). A
 // confirms, returning the highlighted tile's index (0 = folder/import, 1
-// = browse Checkpoint, 2 = browse other apps, 3 = search, 4 = the
-// cartridge tile when shown, otherwise the first title -- the caller
-// already knows which since it's the one that called
+// = browse Checkpoint, 2 = browse other apps, 3 = search, 4 = GBA cheats,
+// 5 = the cartridge tile when shown, otherwise the first title -- the
+// caller already knows which since it's the one that called
 // ui_set_ds_card_visible()). B returns UI_GRID_CANCEL, START returns UI_GRID_EXIT, X returns
 // UI_GRID_ACCOUNT (there's a small person icon in the header as a visual
 // reminder, but it isn't independently selectable, just a hint that X

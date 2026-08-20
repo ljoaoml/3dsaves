@@ -8,6 +8,7 @@
 #include "minizip_reader.h"
 #include "update_check.h"
 #include "swkbd_util.h"
+#include "gba_cheats.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -144,14 +145,14 @@ static const char *title_display_name(const InstalledTitle *t) {
 
 // Mirrors ui.c's own internal grid_reserved_count() (see
 // ui_set_ds_card_visible()'s doc comment) -- ui.c only knows the bool it
-// was last told, this is the side that actually knows why: 4 always-there
+// was last told, this is the side that actually knows why: 5 always-there
 // tiles, +1 more when a cartridge is currently detected.
 static int grid_reserved_count(const MenuState *state) {
-    return state->dsCardPresent ? 5 : 4;
+    return state->dsCardPresent ? 6 : 5;
 }
 
-// ui_run_icon_grid()'s caption callback: index 0/1/2/3 are its four
-// always-present reserved tiles, index 4 is the DS-cartridge tile when
+// ui_run_icon_grid()'s caption callback: index 0/1/2/3/4 are its five
+// always-present reserved tiles, index 5 is the DS-cartridge tile when
 // state->dsCardPresent, and title indices (lining up with
 // title_icon_pixels() below, same state->visible indexing) start right
 // after whichever of those is the last one present. The physical game
@@ -172,7 +173,8 @@ static const char *grid_label(int index, void *userdata) {
         snprintf(labelBuf, sizeof(labelBuf), "Search: \"%s\"", state->searchQuery);
         return labelBuf;
     }
-    if (state->dsCardPresent && index == 4) {
+    if (index == 4) return "GBA Cheats";
+    if (state->dsCardPresent && index == 5) {
         static char labelBuf[300];
         snprintf(labelBuf, sizeof(labelBuf), "%s (cartridge in slot)", state->dsCard.name);
         return labelBuf;
@@ -1125,6 +1127,76 @@ static void show_other_apps_picker(DropboxTokens *tokens) {
     free(titles);
 }
 
+// GBA cheat management: mGBA's 3DS build has no on-device way to type in a
+// cheat code -- it only auto-loads a "<romname>.cheats" sidecar file that
+// has to be prepared on a PC and copied over. This lets the user add one
+// directly from the console instead, writing the exact format mGBA's own
+// cheat loader reads back (see gba_cheats.h/.c). V1 only supports adding a
+// cheat, not editing/deleting/toggling an existing one -- existing entries
+// are listed so the user can see what's already there before adding more.
+typedef struct {
+    const GbaCheatEntry *entries;
+    int count;
+} GbaCheatMenuCtx;
+
+static const char *gba_cheat_menu_label(int index, void *userdata) {
+    const GbaCheatMenuCtx *ctx = (const GbaCheatMenuCtx *)userdata;
+    if (index == 0) return "[+ Add new cheat]";
+    return ctx->entries[index - 1].name;
+}
+
+static void show_gba_cheats(void) {
+    char romPath[512];
+    if (!sd_browse_pick_file("sdmc:/", ".gba", romPath, sizeof(romPath))) {
+        return; // B: cancelled
+    }
+
+    char cheatsPath[560];
+    gba_cheats_path_for_rom(romPath, cheatsPath, sizeof(cheatsPath));
+
+    const char *romName = strrchr(romPath, '/');
+    romName = romName ? romName + 1 : romPath;
+
+    static GbaCheatEntry entries[64];
+    for (;;) {
+        int count = 0;
+        gba_cheats_list(cheatsPath, entries, 64, &count);
+        GbaCheatMenuCtx ctx = { entries, count };
+
+        char title[192];
+        snprintf(title, sizeof(title), "Cheats: %s", romName);
+        int choice = ui_run_menu(title, count + 1, gba_cheat_menu_label, &ctx);
+        if (choice < 0) break; // B: back to the home screen
+
+        if (choice > 0) {
+            // V1: existing cheats are informational only (no edit/delete/
+            // toggle yet) -- selecting one just confirms it's already there.
+            ui_clear();
+            ui_printf("\"%s\" is already added.\n", entries[choice - 1].name);
+            ui_print("Editing/removing existing cheats isn't supported yet.\n");
+            ui_wait_for_a();
+            continue;
+        }
+
+        char name[64] = {0};
+        if (!swkbd_get_text("Cheat name", name, sizeof(name), false)) continue;
+
+        char code[128] = {0};
+        if (!swkbd_get_text("Cheat code (one line)", code, sizeof(code), false)) continue;
+
+        if (!gba_cheats_add(cheatsPath, name, code)) {
+            ui_clear();
+            ui_print_error("\nFailed to save the cheat (check free space).\n");
+            ui_wait_for_a();
+            continue;
+        }
+
+        ui_clear();
+        ui_print_success("\nCheat added. Restart the ROM in mGBA to load it.\n");
+        ui_wait_for_a();
+    }
+}
+
 #ifndef KONNECT3DS_GIT_HASH
 #define KONNECT3DS_GIT_HASH "unknown"
 #endif
@@ -1322,7 +1394,12 @@ int main(void) {
                 continue;
             }
 
-            if (state.dsCardPresent && choice == 4) {
+            if (choice == 4) {
+                show_gba_cheats();
+                continue;
+            }
+
+            if (state.dsCardPresent && choice == 5) {
                 // Same target screen the "Checkpoint" tile's own list
                 // reaches for this exact folder -- this is just a more
                 // direct way in, not a different flow. The actual read of
