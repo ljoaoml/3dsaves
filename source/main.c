@@ -9,6 +9,7 @@
 #include "update_check.h"
 #include "swkbd_util.h"
 #include "gba_cheats.h"
+#include "gba_cheat_fetch.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -1125,12 +1126,15 @@ static void show_other_apps_picker(DropboxTokens *tokens) {
 }
 
 // GBA cheat management: mGBA's 3DS build has no on-device way to type in a
-// cheat code -- it only auto-loads a "<romname>.cheats" sidecar file that
-// has to be prepared on a PC and copied over. This lets the user add one
-// directly from the console instead, writing the exact format mGBA's own
-// cheat loader reads back (see gba_cheats.h/.c). V1 only supports adding a
-// cheat, not editing/deleting/toggling an existing one -- existing entries
-// are listed so the user can see what's already there before adding more.
+// cheat code, and typing individual codes by hand on the 3DS keyboard
+// doesn't scale to "give me everything available for this game" the way
+// Checkpoint's Sharkive does for native 3DS titles. This does the same
+// thing for GBA instead: reads the ROM's own header title, looks it up
+// against a bundled index of libretro-database's community cheat files
+// (the same database RetroArch itself uses), and downloads + converts a
+// match straight into the ".cheats" sidecar file mGBA reads back (see
+// gba_cheats.h/gba_cheat_fetch.h). Existing cheats are listed so the user
+// can see what's already there; V1 has no edit/delete/toggle of an entry.
 typedef struct {
     const GbaCheatEntry *entries;
     int count;
@@ -1138,8 +1142,25 @@ typedef struct {
 
 static const char *gba_cheat_menu_label(int index, void *userdata) {
     const GbaCheatMenuCtx *ctx = (const GbaCheatMenuCtx *)userdata;
-    if (index == 0) return "[+ Add new cheat]";
+    if (index == 0) return "[Search cheat database]";
     return ctx->entries[index - 1].name;
+}
+
+typedef struct {
+    char (*candidates)[GBA_CHEAT_FILENAME_MAX];
+    int count;
+} GbaCandidateMenuCtx;
+
+static const char *gba_candidate_menu_label(int index, void *userdata) {
+    const GbaCandidateMenuCtx *ctx = (const GbaCandidateMenuCtx *)userdata;
+    // Strip the trailing ".cht" for a cleaner display -- static is safe
+    // since ui_run_menu() only ever needs the most recently returned
+    // label alive, same contract every other label callback here relies on.
+    static char label[GBA_CHEAT_FILENAME_MAX];
+    snprintf(label, sizeof(label), "%s", ctx->candidates[index]);
+    size_t len = strlen(label);
+    if (len > 4 && strcmp(label + len - 4, ".cht") == 0) label[len - 4] = '\0';
+    return label;
 }
 
 static void show_gba_cheats(void) {
@@ -1175,21 +1196,63 @@ static void show_gba_cheats(void) {
             continue;
         }
 
-        char name[64] = {0};
-        if (!swkbd_get_text("Cheat name", name, sizeof(name), false)) continue;
-
-        char code[128] = {0};
-        if (!swkbd_get_text("Cheat code (one line)", code, sizeof(code), false)) continue;
-
-        if (!gba_cheats_add(cheatsPath, name, code)) {
+        char romTitle[13];
+        if (!gba_rom_read_title(romPath, romTitle, sizeof(romTitle))) {
             ui_clear();
-            ui_print_error("\nFailed to save the cheat (check free space).\n");
+            ui_print_error("\nCouldn't read this ROM's header.\n");
+            ui_wait_for_a();
+            continue;
+        }
+
+        static char candidates[GBA_CHEAT_MAX_CANDIDATES][GBA_CHEAT_FILENAME_MAX];
+        int candidateCount = gba_cheat_search(romTitle, candidates, GBA_CHEAT_MAX_CANDIDATES);
+        if (candidateCount == 0) {
+            ui_clear();
+            ui_print("\nNo cheats found for this game in the database.\n");
+            ui_wait_for_a();
+            continue;
+        }
+
+        const char *chosenFile;
+        if (candidateCount == 1) {
+            chosenFile = candidates[0];
+        } else {
+            // Multiple matches (different regions/versions, or more than
+            // one cheat-type file for the same release) -- ask rather than
+            // silently guessing which one to fetch.
+            GbaCandidateMenuCtx candCtx = { candidates, candidateCount };
+            int pick = ui_run_menu("Choose a match", candidateCount, gba_candidate_menu_label, &candCtx);
+            if (pick < 0) continue; // B: back to the cheat list
+            chosenFile = candidates[pick];
+        }
+
+        ui_clear();
+        ui_printf("Fetching cheats for %s...\n", romName);
+        ui_flush();
+
+        int written = 0, skipped = 0;
+        char error[128];
+        if (!gba_cheat_fetch_and_write(chosenFile, cheatsPath, &written, &skipped, error, sizeof(error))) {
+            char msg[192];
+            snprintf(msg, sizeof(msg), "\nFetch failed: %s\n", error);
+            ui_clear();
+            ui_print_error(msg);
             ui_wait_for_a();
             continue;
         }
 
         ui_clear();
-        ui_print_success("\nCheat added. Restart the ROM in mGBA to load it.\n");
+        if (written > 0) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "\nAdded %d new cheat(s). Restart the ROM in mGBA to load them.\n", written);
+            ui_print_success(msg);
+        } else {
+            ui_print("\nNothing new to add -- every cheat found was already here.\n");
+        }
+        if (skipped > 0) {
+            ui_printf("%d cheat(s) used a format this app doesn't convert yet and were skipped.\n", skipped);
+        }
         ui_wait_for_a();
     }
 }

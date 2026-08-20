@@ -50,14 +50,14 @@ void gba_cheats_list(const char *cheatsPath, GbaCheatEntry *out, int maxEntries,
     if (outCount) *outCount = count;
 }
 
-bool gba_cheats_add(const char *cheatsPath, const char *name, const char *codeLine) {
+bool gba_cheats_add_raw(const char *cheatsPath, const char *name, const char *rawLines) {
     FILE *f = fopen(cheatsPath, "ab");
     if (!f) return false;
 
-    // A single "# name\ncode\n" entry is tiny (well under the SD card
-    // write-size limit that forced chunked writes elsewhere in this app),
-    // so one fprintf() call is safe here.
-    int written = fprintf(f, "# %s\n%s\n", name, codeLine);
+    // A "# name\n<lines>" entry is tiny (well under the SD card write-size
+    // limit that forced chunked writes elsewhere in this app), so one
+    // fprintf() call is safe here even for a several-line cheat.
+    int written = fprintf(f, "# %s\n%s", name, rawLines);
     fclose(f);
     return written > 0;
 }
